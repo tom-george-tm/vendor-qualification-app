@@ -6,7 +6,6 @@ from typing import Optional
 class Settings(BaseSettings):
     DATABASE_URL: str
     MONGO_INITDB_DATABASE: str
-
     CLIENT_ORIGIN: str
 
     # SMTP (Deprecated but kept for now)
