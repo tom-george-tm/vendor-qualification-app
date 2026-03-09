@@ -12,7 +12,7 @@ from bson.errors import InvalidId
 router = APIRouter()
 
 @router.post("/upload")
-async def upload_files(files: List[UploadFile] = File(...)):
+async def upload_files(files: Annotated[List[UploadFile], File(...)], vendor_name: str, input_data: str):
     results_saved = []
     
     async with httpx.AsyncClient() as client:
@@ -55,6 +55,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
                 # Prepare data for MongoDB
                 db_record = {
                     "filename": file.filename,
+                    "vendor_name": vendor_name,
                     "result": result_json,
                     "created_at": datetime.datetime.utcnow()
                 }
