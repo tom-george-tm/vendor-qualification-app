@@ -12,7 +12,12 @@ from bson.errors import InvalidId
 router = APIRouter()
 
 @router.post("/upload")
-async def upload_files(files: Annotated[List[UploadFile], File(...)], vendor_name: str, input_data: str):
+async def upload_files(
+    files: Annotated[List[UploadFile], File(...)],
+    vendor_name: Annotated[str, Form(...)],
+    input_data: Annotated[str, Form(...)]
+):
+
     results_saved = []
     
     async with httpx.AsyncClient() as client:
