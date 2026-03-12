@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     WORKFLOW_API_URL: str = "http://localhost:8000/workflow/163f55aa-4a92-4164-94cb-a4210e1d7509"
     NOTIFICATION_EMAIL: EmailStr = "admin@example.com"
 
+    # OpenAI
+    OPENAI_API_KEY: str
+
     model_config = SettingsConfigDict(env_file='./.env', extra='ignore')
 
 
