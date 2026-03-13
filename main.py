@@ -1,28 +1,37 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from app.config import settings
-from app.routers import workflow, tracker
+from app.database import init_db
+from app.routers import workflow, tracker, dashboard, chat
 
-app = FastAPI(title="Vendor Qualification API")
 
-origins = [
-    settings.CLIENT_ORIGIN,
-]
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+
+
+app = FastAPI(title="Vendor Qualification API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allowing all for easier testing
+    allow_origins=[settings.CLIENT_ORIGIN],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(workflow.router, tags=['Workflow'], prefix='/api/workflow')
-app.include_router(tracker.router, tags=['Tracker'], prefix='/api/tracker')
+app.include_router(workflow.router, tags=["Workflow"], prefix="/api/workflow")
+app.include_router(tracker.router, tags=["Tracker"], prefix="/api/tracker")
+app.include_router(dashboard.router, tags=["Dashboard"], prefix="/api/dashboard")
+app.include_router(chat.router, tags=["Chat"], prefix="/api/chat")
+
 
 @app.get("/api/healthchecker")
 def root():
     return {"message": "Welcome to the refactored Vendor Qualification API"}
+
 
 if __name__ == "__main__":
     import uvicorn

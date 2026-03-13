@@ -27,14 +27,6 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str
     OPENAI_MODEL: str = "gpt-4o-mini"
 
-    # Legacy workflow settings (kept for reference)
-    WORKFLOW_API_URL: str = "http://localhost:8000/workflow/163f55aa-4a92-4164-94cb-a4210e1d7509"
-    NOTIFICATION_EMAIL: EmailStr = "admin@example.com"
-    
-    # OpenAI Settings
-    OPENAI_API_KEY: str
-    OPENAI_MODEL: str = "gpt-4o-mini"
-
     model_config = SettingsConfigDict(env_file='./.env', extra='ignore')
 
 
