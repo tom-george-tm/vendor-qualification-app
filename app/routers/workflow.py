@@ -170,13 +170,17 @@ async def get_result_by_id(result_id: str):
     except InvalidId:
         raise HTTPException(status_code=400, detail="Invalid ID format")
 
+
     doc = Results.find_one({"_id": object_id})
+
 
     if not doc:
         raise HTTPException(status_code=404, detail=f"Result with ID '{result_id}' not found")
 
+
     doc["_id"] = str(doc["_id"])
     if isinstance(doc.get("created_at"), datetime.datetime):
         doc["created_at"] = doc["created_at"].isoformat()
+
 
     return doc

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import workflow
+from app.routers import workflow, tracker
 
 app = FastAPI(title="Vendor Qualification API")
 
@@ -18,6 +18,7 @@ app.add_middleware(
 )
 
 app.include_router(workflow.router, tags=['Workflow'], prefix='/api/workflow')
+app.include_router(tracker.router, tags=['Tracker'], prefix='/api/tracker')
 
 @app.get("/api/healthchecker")
 def root():
