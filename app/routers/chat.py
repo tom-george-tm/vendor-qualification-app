@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from openai import AsyncOpenAI
+from openai import AsyncAzureOpenAI
 from datetime import datetime
 import uuid
 import logging
@@ -12,7 +12,11 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+openai_client = AsyncAzureOpenAI(
+    api_key=settings.AZURE_OPENAI_API_KEY,
+    azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+    api_version=settings.AZURE_OPENAI_API_VERSION,
+)
 
 REQUIRED_DOCUMENTS = [
     "Environmental Impact Assessment (EIA)",
@@ -263,7 +267,7 @@ async def send_message(body: ChatRequest):
 
     try:
         response = await openai_client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=settings.AZURE_OPENAI_DEPLOYMENT_MINI,
             messages=openai_messages,
             temperature=0.3,
             max_tokens=1024,

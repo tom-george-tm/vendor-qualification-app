@@ -7,7 +7,7 @@ import logging
 import datetime
 from bson import ObjectId
 from bson.errors import InvalidId
-from openai import AsyncOpenAI
+from openai import AsyncAzureOpenAI
 import fitz  # PyMuPDF
 from app.database import Results
 from app.config import settings
@@ -19,7 +19,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+openai_client = AsyncAzureOpenAI(
+    api_key=settings.AZURE_OPENAI_API_KEY,
+    azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+    api_version=settings.AZURE_OPENAI_API_VERSION,
+)
 
 DOC_TYPE_MAP = {
     "EIA": "EIA",
@@ -77,7 +81,7 @@ async def analyse_document_with_openai(
 
     try:
         response = await openai_client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=settings.AZURE_OPENAI_DEPLOYMENT_MINI,
             messages=[
                 {"role": "system", "content": analysis_prompt},
                 {"role": "user", "content": user_content},
@@ -88,8 +92,8 @@ async def analyse_document_with_openai(
         )
         result_text = response.choices[0].message.content or "{}"
     except Exception as e:
-        logger.error("OpenAI API call failed for %s: %s", filename, e)
-        return {"error": f"OpenAI API call failed: {str(e)}"}
+        logger.error("Azure OpenAI API call failed for %s: %s", filename, e)
+        return {"error": f"Azure OpenAI API call failed: {str(e)}"}
 
     try:
         result_json = json.loads(result_text)
@@ -113,7 +117,7 @@ async def aggregate_results_with_openai(all_doc_results: List[dict]) -> dict:
 
     try:
         response = await openai_client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=settings.AZURE_OPENAI_DEPLOYMENT_GPT4O,
             messages=[
                 {"role": "system", "content": aggregator_prompt},
                 {"role": "user", "content": f"Aggregate the following document analyses:\n\n{input_data}"},
