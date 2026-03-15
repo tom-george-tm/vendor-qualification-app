@@ -4,6 +4,7 @@ import logging
 from openai import AsyncAzureOpenAI
 
 from app.constant.approvals_tracker import approvals_tracker_data
+from app.constant.dashboard import dashboard_data
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -24,18 +25,19 @@ async def get_cards():
 async def get_ai_summary():
     system_prompt = (
         "You are an expert project risk analyst.\n"
-        "Analyze the provided approvals tracker data and return a response structured in these exact 4 sections in markdown:\n\n"
+        "Analyze the provided dashboard data, which includes a portfolio of energy and infrastructure projects in the UAE.\n"
+        "Return a comprehensive summary of the entire dashboard structured in these exact 4 sections in markdown:\n\n"
         "## Operational Summary\n"
-        "(paragraph summary)\n\n"
+        "(paragraph summary of the portfolio health, total value, and capacity)\n\n"
         "## Risk Highlights\n"
-        "- (bullet points)\n\n"
+        "- (bullet points identifying specific projects that are Blocked or At Risk, and overdue NOCs)\n\n"
         "## Recommendations\n"
-        "- (bullet points)\n\n"
+        "- (bullet points for actionable steps to mitigate risks and move projects forward)\n\n"
         "## Forecast\n"
-        "(paragraph forecast)"
+        "(paragraph forecast of expected progress and upcoming critical deadlines)"
     )
     
-    user_content = json.dumps(approvals_tracker_data)
+    user_content = json.dumps(dashboard_data)
 
     try:
         response = await openai_client.chat.completions.create(
@@ -48,12 +50,10 @@ async def get_ai_summary():
         )
         ai_summary = response.choices[0].message.content
         return {
-            "input_data": approvals_tracker_data,
             "ai_summary": ai_summary
         }
     except Exception as e:
         logger.error("OpenAI API call failed: %s", e)
         return {
-            "input_data": approvals_tracker_data,
             "ai_summary": f"Failed to generate summary: {str(e)}"
         }
