@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.config import settings
 from app.database import init_db
-from app.routers import workflow, tracker, dashboard, chat, dashboard_chat
+from app.routers import workflow, tracker, dashboard, chat, dashboard_chat, approvals_tracker
 
 
 @asynccontextmanager
@@ -27,6 +27,7 @@ app.include_router(tracker.router, tags=["Tracker"], prefix="/api/tracker")
 app.include_router(dashboard.router, tags=["Dashboard"], prefix="/api/dashboard")
 app.include_router(chat.router, tags=["Chat"], prefix="/api/chat")
 app.include_router(dashboard_chat.router, tags=["Dashboard Chat"], prefix="/api/dashboard/chat")
+app.include_router(approvals_tracker.router, tags=["approvals-tracker"], prefix="/approvals-tracker")
 
 
 @app.get("/api/healthchecker")
