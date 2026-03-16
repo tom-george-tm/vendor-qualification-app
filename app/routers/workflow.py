@@ -46,7 +46,18 @@ def lookup_document_from_constants(filename: str, doc_type: str) -> dict:
     """
     if filename in project_data:
         logger.info("Loaded pre-analyzed data for: %s", filename)
-        result = dict(project_data[filename])  # shallow copy so we don't mutate the constant
+        raw = project_data[filename]
+
+        # ✅ Flatten: pull fields out of nested "document_analysis" to top level
+        inner = raw.get("document_analysis", {})
+        result = {
+            "document_type": inner.get("document_type", doc_type),
+            "document_status": inner.get("document_status", "Unknown"),
+            "risk_level": inner.get("risk_level", "Unknown"),
+            "decision_reasoning": inner.get("decision_reasoning", ""),
+            "recommendations": inner.get("recommendations", []),
+            "checklist_results": inner.get("checklist_results", []),
+        }
     else:
         logger.warning("No pre-analyzed data found for '%s'. Using fallback placeholder.", filename)
         result = {
@@ -58,7 +69,7 @@ def lookup_document_from_constants(filename: str, doc_type: str) -> dict:
             "checklist_results": [],
         }
 
-    # Always stamp filename and document_type so the aggregator has full context
+    # Always stamp filename and document_type
     result["filename"] = filename
     result["document_type"] = doc_type
     return result
