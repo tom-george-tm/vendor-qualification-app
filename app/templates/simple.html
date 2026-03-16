@@ -1,0 +1,60 @@
+<!-- <div style="width:100%;max-width:700px;margin:0 auto;font-family:sans-serif;">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script><canvas
+        id="chart_fa0eb929f0f1"></canvas>
+    <script>const ctx = document.getElementById('chart_fa0eb929f0f1').getContext('2d'); new Chart(ctx, { type: 'doughnut', data: { labels: ['On Track', 'At Risk', 'Blocked'], datasets: [{ data: [4, 4, 2], backgroundColor: ['#22c55e', '#f59e0b', '#ef4444'], hoverOffset: 10 }] }, options: { responsive: true, maintainAspectRatio: true, plugins: { title: { display: true, text: 'Rate of Projects by Risk Status', font: { size: 16 } } } } });</script>
+</div> -->
+
+<div style="width:100%;max-width:700px;margin:0 auto;font-family:sans-serif;">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+    <canvas id="chart_acf9e28c1fa2"></canvas>
+
+    <script>
+        const ctx = document.getElementById('chart_acf9e28c1fa2').getContext('2d');
+
+        new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: [
+                    'Sharjah Coastal Wind Farm',
+                    'KIZAD Green Hydrogen Hub',
+                    'Fujairah Gas-to-Power Peaker Plant',
+                    'Abu Dhabi Transmission Grid Upgrade'
+                ],
+                datasets: [
+                    {
+                        label: 'Project Value (AED in billions)',
+                        data: [4.1, 6.8, 7.8, 5.6],
+                        backgroundColor: '#f59e0b',
+                        borderWidth: 1
+                    },
+                    {
+                        label: 'Capacity (MW)',
+                        data: [400, 200, 600, 0],
+                        backgroundColor: '#3b82f6',
+                        borderWidth: 1
+                    }
+                ]
+            },
+            options: {
+                indexAxis: 'y',   // 👈 this makes it horizontal
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: 'Projects At Risk: Value and Capacity Overview'
+                    },
+                    legend: {
+                        position: 'bottom'
+                    }
+                },
+                scales: {
+                    x: {
+                        beginAtZero: true
+                    }
+                }
+            }
+        });
+    </script>
+</div>
