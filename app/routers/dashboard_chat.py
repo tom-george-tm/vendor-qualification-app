@@ -7,10 +7,10 @@ import uuid
 import logging
 import json
 import re
+import os
 
 from app.database import ChatSessions
 from app.config import settings
-from app.constant.dashboard import dashboard_data
 
 logger = logging.getLogger(__name__)
 
@@ -26,79 +26,81 @@ openai_client = AsyncAzureOpenAI(
 # Build compact dashboard context (injected into every system prompt)
 # ---------------------------------------------------------------------------
 
-def _build_dashboard_context() -> str:
-    """
-    Extract a compact, token-efficient representation of the full dashboard
-    dataset to inject into the AI system prompt.
-    """
-    metadata = dashboard_data.get("metadata", {})
-    portfolio = dashboard_data.get("portfolio_summary", {})
-    projects = dashboard_data.get("projects", [])
+# def _build_dashboard_context() -> str:
+#     """
+#     Extract a compact, token-efficient representation of the full dashboard
+#     dataset to inject into the AI system prompt.
+#     """
+#     metadata = dashboard_data.get("metadata", {})
+#     portfolio = dashboard_data.get("portfolio_summary", {})
+#     projects = dashboard_data.get("projects", [])
 
-    compact_projects = []
-    for p in projects:
-        stages_summary = [
-            {
-                "stage": s.get("stage_number"),
-                "name": s.get("name"),
-                "authority": s.get("authority"),
-                "status": s.get("status"),
-                "sla_days": s.get("sla_days"),
-                "actual_days": s.get("actual_days"),
-                "days_elapsed": s.get("days_elapsed"),
-                "days_overdue": s.get("days_overdue"),
-                "notes": s.get("notes", "")[:120],
-            }
-            for s in p.get("stages", [])
-        ]
-        noc_tracker_summary = [
-            {
-                "authority": n.get("authority"),
-                "type": n.get("type"),
-                "status": n.get("status"),
-                "sla_days": n.get("sla_days"),
-                "days_taken": n.get("days_taken"),
-                "days_elapsed": n.get("days_elapsed"),
-            }
-            for n in p.get("noc_tracker", [])
-        ]
-        compact_projects.append({
-            "id": p.get("id"),
-            "name": p.get("name"),
-            "type": p.get("type"),
-            "emirate": p.get("emirate"),
-            "capacity_mw": p.get("capacity_mw"),
-            "value_aed": p.get("value_aed"),
-            "developer": p.get("developer"),
-            "status": p.get("status"),
-            "current_stage": p.get("current_stage"),
-            "readiness_score": p.get("readiness_score"),
-            "days_since_last_update": p.get("days_since_last_update"),
-            "last_update_note": p.get("last_update_note", "")[:150],
-            "noc_summary": p.get("noc_summary", {}),
-            "noc_tracker": noc_tracker_summary,
-            "ai_flags": [
-                {
-                    "severity": f.get("severity"),
-                    "title": f.get("title"),
-                    "description": f.get("description", "")[:120],
-                    "recommendation": f.get("recommendation", "")[:120],
-                }
-                for f in p.get("ai_flags", [])
-            ],
-            "documents": p.get("documents", {}),
-            "stages": stages_summary,
-        })
+#     compact_projects = []
+#     for p in projects:
+#         stages_summary = [
+#             {
+#                 "stage": s.get("stage_number"),
+#                 "name": s.get("name"),
+#                 "authority": s.get("authority"),
+#                 "status": s.get("status"),
+#                 "sla_days": s.get("sla_days"),
+#                 "actual_days": s.get("actual_days"),
+#                 "days_elapsed": s.get("days_elapsed"),
+#                 "days_overdue": s.get("days_overdue"),
+#                 "notes": s.get("notes", "")[:120],
+#             }
+#             for s in p.get("stages", [])
+#         ]
+#         noc_tracker_summary = [
+#             {
+#                 "authority": n.get("authority"),
+#                 "type": n.get("type"),
+#                 "status": n.get("status"),
+#                 "sla_days": n.get("sla_days"),
+#                 "days_taken": n.get("days_taken"),
+#                 "days_elapsed": n.get("days_elapsed"),
+#             }
+#             for n in p.get("noc_tracker", [])
+#         ]
+#         compact_projects.append({
+#             "id": p.get("id"),
+#             "name": p.get("name"),
+#             "type": p.get("type"),
+#             "emirate": p.get("emirate"),
+#             "capacity_mw": p.get("capacity_mw"),
+#             "value_aed": p.get("value_aed"),
+#             "developer": p.get("developer"),
+#             "status": p.get("status"),
+#             "current_stage": p.get("current_stage"),
+#             "readiness_score": p.get("readiness_score"),
+#             "days_since_last_update": p.get("days_since_last_update"),
+#             "last_update_note": p.get("last_update_note", "")[:150],
+#             "noc_summary": p.get("noc_summary", {}),
+#             "noc_tracker": noc_tracker_summary,
+#             "ai_flags": [
+#                 {
+#                     "severity": f.get("severity"),
+#                     "title": f.get("title"),
+#                     "description": f.get("description", "")[:120],
+#                     "recommendation": f.get("recommendation", "")[:120],
+#                 }
+#                 for f in p.get("ai_flags", [])
+#             ],
+#             "documents": p.get("documents", {}),
+#             "stages": stages_summary,
+#         })
 
-    context = {
-        "metadata": metadata,
-        "portfolio_summary": portfolio,
-        "projects": compact_projects,
-    }
-    return json.dumps(context, indent=2)
+#     context = {
+#         "metadata": metadata,
+#         "portfolio_summary": portfolio,
+#         "projects": compact_projects,
+#     }
+#     return json.dumps(context, indent=2)
 
+_here = os.path.dirname(__file__)
 
-DASHBOARD_CONTEXT = _build_dashboard_context()  # built once at startup
+with open(os.path.join(_here, "../constant/dashboard.json"), "r") as f:
+    DASHBOARD_CONTEXT = json.load(f)# built once at startup
 
 
 # ---------------------------------------------------------------------------
