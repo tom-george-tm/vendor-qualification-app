@@ -71,7 +71,7 @@ Your job is to:
 Return ONLY the following JSON structure, exact keys and data types, no markdown blocks:
 
 {{
-  "project_name": "<Extract from documents or use 'Project Al Noor' if unknown>",
+  "project_name": "<Extract from documents>",
   "project_type": "<Extract from documents>",
   "capacity_mw": <number or null>,
   "location": "<Extract from documents>",
@@ -119,7 +119,7 @@ Return ONLY the following JSON structure, exact keys and data types, no markdown
 
 {
   "project_summary": {
-    "project_name": "<Extract from documents or use 'Project Al Noor' if unknown>",
+    "project_name": "<Extract from documents>",
     "project_type": "<Extract from documents>",
     "capacity_mw": <number or null>,
     "location": "<Extract from documents>",
