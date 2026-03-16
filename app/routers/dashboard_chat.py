@@ -220,7 +220,9 @@ Data:
 
 
 
-GREETING_MESSAGE = "Hello! I'm your Dashboard Intelligence Agent for UAE Energy Project Applications. How can I assist you today?"
+GREETING_MESSAGE = """<div style="padding: 5px;">
+  <p>👋 Hello! I'm your UAE Energy Project Analytics Assistant. How can I assist you today?</p>
+</div>"""
 
 
 # ---------------------------------------------------------------------------
