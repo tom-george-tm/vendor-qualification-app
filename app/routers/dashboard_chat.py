@@ -231,7 +231,8 @@ GREETING_MESSAGE = """<div style="padding: 5px;">
 
 class SessionResponse(BaseModel):
     session_id: str
-    message: str
+    message: Optional[str] = None
+    html: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
@@ -342,7 +343,7 @@ async def create_dashboard_session():
         ],
     })
 
-    return SessionResponse(session_id=session_id, message=GREETING_MESSAGE)
+    return SessionResponse(session_id=session_id, html=GREETING_MESSAGE)
 
 
 @router.post("/message", response_model=ChatResponse)
