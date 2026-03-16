@@ -17,7 +17,6 @@ CHECKLISTS = {
         "marine_coastal_impact": "Is there a marine/coastal impact section? (Expected: Yes)",
         "impact_radius_ecosystems": "Is the impact radius for sensitive ecosystems specified? (Expected: Specified)",
         "environmental_management_plan": "Is an Environmental Management Plan included? (Expected: Yes)",
-        "study_dated_18_months": "Is the study dated within the last 18 months? (Expected: Within 18 months)",
     },
     "Grid Assessment": {
         "load_data_2023_or_later": "Does it reference load data from 2023 or later? (Expected: Post-2023)",
