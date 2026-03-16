@@ -98,7 +98,7 @@ def build_aggregator_prompt() -> str:
     """
     Build the system prompt for the aggregator agent.
     """
-    prompt = """You are a Senior Project Risk Manager.
+    prompt = """You are a Senior Project Risk Manager and AI Permit Readiness Assistant for UAE Energy Project Applications.
 You will be provided with a JSON containing multiple document analysis results for a project.
 Your task is to aggregate these results and provide a comprehensive project readiness assessment.
 
@@ -106,11 +106,9 @@ The mandatory documents for this project type are:
 - EIA (Environmental Impact Assessment)
 - Grid Assessment
 - EPC Contract
-- GCAA NOC
-- Bank Letter
 
 CRITICAL REQUIREMENTS:
-1. If any of the five mandatory documents are missing from the input, set the Overall Risk Level to "High" or "Critical".
+1. If any of the three mandatory documents are missing from the input, set the Overall Risk Level to "High" or "Critical".
 2. Perform "Cross-Document Validation": Check for consistency between documents (e.g., project capacity in EIA vs EPC Contract, locations, dates).
 3. Identify "Critical", "Moderate", and "Minor" issues across all documentation.
 4. Provide a prioritized action list and immediate next steps.
@@ -121,7 +119,7 @@ Return ONLY the following JSON structure, exact keys and data types, no markdown
   "project_summary": {
     "project_name": "<Extract from documents>",
     "project_type": "<Extract from documents>",
-    "capacity_mw": <number or null>,
+    "capacity_mw": <project capacity in MW, number or null>,
     "location": "<Extract from documents>",
     "analysis_timestamp": "<current_iso_timestamp>",
     "documents_analyzed": <count>
