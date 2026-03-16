@@ -66,6 +66,10 @@ Output Rules:
 - Return ONLY valid HTML markup.
 - Do NOT include markdown or explanations.
 
+Conversation Handling:
+- If the user sends a greeting (e.g., hi, hello) or a non-analytics message, respond with a short greeting and explain what analytics questions can be asked.
+- In this case return simple HTML text, not a dashboard.
+
 Data:
 {analytics_json}
 """
