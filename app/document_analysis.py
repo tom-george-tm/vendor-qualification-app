@@ -26,12 +26,14 @@ CHECKLISTS = {
         "grid_operator_named": "Is the grid operator authority named? (Expected: DEWA/SEWA/ADWEA)",
     },
     "EPC Contract": {
-        "arabic_translation": "Is an Arabic translation attached or referenced? (Expected: Yes)",
-        "performance_bonds": "Are performance bonds specified? (Expected: Specified)",
-        "signed_both_parties": "Is the contract signed by both parties? (Expected: Yes)",
+        "project_capacity_specified": "Does the contract clearly specify the project capacity (MW)? (Expected: Specified)",
+        "location_and_coordinates": "Are the project location and site coordinates explicitly mentioned? (Expected: Mentioned)",
+        "grid_interconnection_compliance": "Is there a clause confirming compliance with national grid interconnection standards? (Expected: Present)",
+        "completion_timeline_defined": "Is the project completion timeline and commissioning date defined? (Expected: Defined)",
+        "performance_guarantee_clause": "Is there a performance guarantee or output efficiency clause included? (Expected: Included)",
     },
     "GCAA NOC": {
-        "document_present": "Is the document present? (if absent, critical blocker) (Expected: Present)",
+        "document_present": "Is the document present? (if absent, auto-flag as critical blocker) (Expected: Present)",
         "approval_within_12_months": "Is the approval date within 12 months? (Expected: Within 12 months)",
         "correct_gps_coordinates": "Does it cover the correct GPS coordinates? (Expected: Correct coordinates)",
     },
