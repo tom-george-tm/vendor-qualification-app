@@ -8,9 +8,12 @@ import re
 import json
 import logging
 
+import os
+import shutil
+
 from app.database import Results, ChatSessions
 from app.config import settings
-from app.workflows.claims_workflow import claim_workflow, REQUIRED_DOC_TYPES
+from app.workflows.claims_workflow import claim_workflow, REQUIRED_DOC_TYPES, DIR as CLAIMS_UPLOAD_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -439,10 +442,115 @@ async def send_claim_message(body: ChatRequest):
     session = await _get_session(body.session_id)
     messages_history: list = session.get("messages", [])
     stored_analysis: Optional[dict] = session.get("claim_analysis")
+    settlement_pending: bool = session.get("settlement_pending", False)
+    settlement_info: dict = session.get("settlement_info", {})
     now = datetime.utcnow()
 
-    # ── Branch A: follow-up Q&A using stored claim analysis ─────────────────
-    if stored_analysis:
+    # ── Branch A: Settlement pending – handle proceed / custom amount ───────
+    if settlement_pending and settlement_info:
+        user_msg = body.message.strip()
+        user_msg_lower = user_msg.lower()
+        proceed_keywords = {"yes", "proceed", "approve", "accept", "confirm", "ok", "okay"}
+        is_proceed = bool(proceed_keywords & set(user_msg_lower.split()))
+
+        # Try to parse a custom numeric amount
+        custom_amount: Optional[float] = None
+        if not is_proceed:
+            amt_match = re.search(r"(\d[\d,]*\.?\d*)", user_msg.replace(" ", ""))
+            if amt_match:
+                try:
+                    custom_amount = float(amt_match.group(1).replace(",", ""))
+                except ValueError:
+                    custom_amount = None
+
+        if is_proceed:
+            # ── Process claim at settlement amount & delete folder ──
+            s_claim_id = settlement_info.get("claim_id", "")
+            s_amount = settlement_info.get("settlement_amount", 0)
+            claim_folder = os.path.join(CLAIMS_UPLOAD_DIR, s_claim_id)
+            if os.path.isdir(claim_folder):
+                shutil.rmtree(claim_folder)
+                logger.info("Deleted claim folder after approval: %s", claim_folder)
+
+            response_msg = (
+                f"\u2705 **Claim `{s_claim_id}` \u2014 Processed Successfully!**\n\n"
+                f"\ud83d\udcb0 Settlement amount of **\u20b9{s_amount:,.2f}** has been approved "
+                f"and processed.\n\n"
+                "The claim documents have been archived and removed.\n\n"
+                "Thank you for using the Claim Analysis Assistant! "
+                "You can start a new claim by providing another Claim ID."
+            )
+            await ChatSessions.update_one(
+                {"session_id": body.session_id},
+                {"$set": {"settlement_pending": False}},
+            )
+            has_data = True
+
+        elif custom_amount is not None and custom_amount > 0:
+            # ── Process claim at user-specified amount & delete folder ──
+            s_claim_id = settlement_info.get("claim_id", "")
+            original_amt = settlement_info.get("settlement_amount", 0)
+            claim_folder = os.path.join(CLAIMS_UPLOAD_DIR, s_claim_id)
+            if os.path.isdir(claim_folder):
+                shutil.rmtree(claim_folder)
+                logger.info("Deleted claim folder after custom-amount approval: %s", claim_folder)
+
+            response_msg = (
+                f"\u2705 **Claim `{s_claim_id}` \u2014 Processed with Custom Amount!**\n\n"
+                f"\ud83d\udcb0 Your custom claim amount of **\u20b9{custom_amount:,.2f}** has been "
+                f"accepted and processed.\n"
+                f"*(Original settlement amount was \u20b9{original_amt:,.2f})*\n\n"
+                "The claim documents have been archived and removed.\n\n"
+                "Thank you for using the Claim Analysis Assistant! "
+                "You can start a new claim by providing another Claim ID."
+            )
+            await ChatSessions.update_one(
+                {"session_id": body.session_id},
+                {"$set": {"settlement_pending": False}},
+            )
+            has_data = True
+
+        else:
+            # Not a settlement action — treat as Q&A about the claim
+            context_json = json.dumps(stored_analysis or {}, indent=2, default=str)
+            openai_msgs = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an insurance claim analysis assistant. "
+                        "Answer the user's questions using ONLY the claim analysis data "
+                        "provided below. Be precise, professional, and helpful.\n\n"
+                        "IMPORTANT: A settlement offer is currently pending for this claim. "
+                        "If the user seems to be asking about proceeding or the amount, "
+                        "remind them they can reply 'proceed' to accept or provide a "
+                        "different amount.\n\n"
+                        f"CLAIM ANALYSIS DATA:\n{context_json[:8000]}"
+                    ),
+                }
+            ]
+            for msg in messages_history[-20:]:
+                openai_msgs.append({"role": msg["role"], "content": msg["content"]})
+            openai_msgs.append({"role": "user", "content": body.message})
+
+            try:
+                resp = await openai_client.chat.completions.create(
+                    model=settings.AZURE_OPENAI_DEPLOYMENT_MINI,
+                    messages=openai_msgs,
+                    temperature=0.3,
+                    max_tokens=1024,
+                )
+                response_msg = (
+                    resp.choices[0].message.content
+                    or "I'm sorry, I could not generate a response. Please try again."
+                )
+            except Exception as exc:
+                logger.error("OpenAI claim Q&A error for session %s: %s", body.session_id, exc)
+                raise HTTPException(status_code=500, detail="Failed to get a response from AI.")
+
+            has_data = True
+
+    # ── Branch B: follow-up Q&A using stored claim analysis ─────────────────
+    elif stored_analysis:
         context_json = json.dumps(stored_analysis, indent=2, default=str)
         openai_msgs = [
             {
@@ -476,7 +584,7 @@ async def send_claim_message(body: ChatRequest):
 
         has_data = True
 
-    # ── Branch B: first message — expect a Claim ID ──────────────────────────
+    # ── Branch C: first message — expect a Claim ID ──────────────────────────
     else:
         match = re.fullmatch(r"(CLAIM_ID_\d+)", body.message.strip())
 
@@ -502,6 +610,10 @@ async def send_claim_message(body: ChatRequest):
                 "missing_docs": [],
                 "document_analyses": [],
                 "aggregated_result": {},
+                "bill_amount": None,
+                "settlement_amount": None,
+                "deduction_percentage": 0,
+                "is_ready": False,
                 "response_message": "",
                 "error": None,
             }
@@ -510,14 +622,28 @@ async def send_claim_message(body: ChatRequest):
             response_msg = result["response_message"]
             has_data = bool(result.get("aggregated_result"))
 
-            # Persist analysis to the session (strip raw bytes – they are not in aggregated_result)
+            # Persist analysis & settlement info to the session
             if has_data:
+                is_ready = result.get("is_ready", False)
+                settle_amt = result.get("settlement_amount")
+                s_pending = bool(is_ready and settle_amt is not None)
+                s_info = {}
+                if s_pending:
+                    s_info = {
+                        "claim_id": claim_id,
+                        "bill_amount": result.get("bill_amount"),
+                        "settlement_amount": settle_amt,
+                        "deduction_percentage": result.get("deduction_percentage", 0),
+                    }
+
                 await ChatSessions.update_one(
                     {"session_id": body.session_id},
                     {
                         "$set": {
                             "claim_id": claim_id,
                             "claim_analysis": result["aggregated_result"],
+                            "settlement_pending": s_pending,
+                            "settlement_info": s_info,
                         }
                     },
                 )

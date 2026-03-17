@@ -38,6 +38,9 @@ DIR = "./temp_uploads"
 
 REQUIRED_DOC_TYPES = ["Bill", "Blood report", "Medical report"]
 
+SETTLEMENT_THRESHOLD = 100000  # ₹1,00,000 (1 lakh)
+DEDUCTION_PERCENTAGE = 10      # 10% co-payment for amounts above threshold
+
 # Simple keyword → document type mapping (checked against the lowercased filename)
 _FILENAME_KEYWORDS: dict[str, list[str]] = {
     "Bill": ["bill", "invoice", "receipt", "charge", "payment"],
@@ -83,6 +86,12 @@ class ClaimWorkflowState(TypedDict):
     missing_docs: List[str]
     document_analyses: List[dict]
     aggregated_result: dict
+
+    # Settlement
+    bill_amount: Optional[float]
+    settlement_amount: Optional[float]
+    deduction_percentage: Optional[float]
+    is_ready: bool
 
     # Output
     response_message: str
@@ -354,7 +363,116 @@ async def node_aggregate(state: ClaimWorkflowState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node 6 – Format the final chat response
+# Node 6 – Extract total bill amount from Bill documents
+# ---------------------------------------------------------------------------
+
+
+async def node_extract_bill_amount(state: ClaimWorkflowState) -> dict:
+    """Extract the total bill amount from Bill-type documents using AI vision."""
+    agg = state.get("aggregated_result", {})
+    overall = agg.get("overall_assessment", {})
+    submission_status = overall.get("submission_status", "Not Ready")
+
+    if submission_status != "Ready":
+        logger.info("Claim %s not ready — skipping bill amount extraction.", state["claim_id"])
+        return {"bill_amount": None, "is_ready": False}
+
+    # Find Bill documents from the classified files
+    bill_files = [f for f in state.get("classified_files", []) if f["doc_type"] == "Bill"]
+    if not bill_files:
+        logger.warning("Claim %s is ready but no Bill document found.", state["claim_id"])
+        return {"bill_amount": None, "is_ready": True}
+
+    bill = bill_files[0]
+
+    # Convert PDF pages to images and ask AI to extract the total amount
+    try:
+        pdf = fitz.open(stream=bill["content"], filetype="pdf")
+        user_content: list = [
+            {
+                "type": "text",
+                "text": (
+                    "Extract the TOTAL / GRAND TOTAL bill amount from this hospital or "
+                    "medical bill. Return ONLY valid JSON with the key 'total_amount' as "
+                    "a plain number (no currency symbol, no commas). "
+                    'Example: {"total_amount": 150000}'
+                ),
+            }
+        ]
+        for page_num in range(len(pdf)):
+            page = pdf.load_page(page_num)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+            img_bytes = pix.tobytes("png")
+            b64 = base64.b64encode(img_bytes).decode("utf-8")
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                }
+            )
+        pdf.close()
+
+        response = await _openai_client.chat.completions.create(
+            model=settings.AZURE_OPENAI_DEPLOYMENT_MINI,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a document data extractor specialising in hospital "
+                        "and medical bills. Extract the total/grand-total amount and "
+                        "return ONLY valid JSON."
+                    ),
+                },
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.0,
+            max_tokens=100,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(response.choices[0].message.content or "{}")
+        amount = float(result.get("total_amount", 0))
+        logger.info("Extracted bill amount for %s: %.2f", state["claim_id"], amount)
+        return {"bill_amount": amount, "is_ready": True}
+    except Exception as exc:
+        logger.error("Bill amount extraction failed for %s: %s", state["claim_id"], exc)
+        return {"bill_amount": None, "is_ready": True}
+
+
+# ---------------------------------------------------------------------------
+# Node 7 – Calculate settlement (apply co-payment deduction if needed)
+# ---------------------------------------------------------------------------
+
+
+async def node_calculate_settlement(state: ClaimWorkflowState) -> dict:
+    """Apply co-payment deduction when the bill exceeds the threshold."""
+    bill_amount = state.get("bill_amount")
+    is_ready = state.get("is_ready", False)
+
+    if not is_ready or not bill_amount:
+        return {"settlement_amount": None, "deduction_percentage": 0}
+
+    if bill_amount > SETTLEMENT_THRESHOLD:
+        deduction = bill_amount * DEDUCTION_PERCENTAGE / 100
+        settlement = bill_amount - deduction
+        logger.info(
+            "Claim %s: bill %.2f exceeds %d — %d%% deduction -> settlement %.2f",
+            state["claim_id"], bill_amount, SETTLEMENT_THRESHOLD,
+            DEDUCTION_PERCENTAGE, settlement,
+        )
+        return {
+            "settlement_amount": settlement,
+            "deduction_percentage": DEDUCTION_PERCENTAGE,
+        }
+
+    logger.info(
+        "Claim %s: bill %.2f within threshold — no deduction applied.",
+        state["claim_id"], bill_amount,
+    )
+    return {"settlement_amount": bill_amount, "deduction_percentage": 0}
+
+
+# ---------------------------------------------------------------------------
+# Node 8 – Format the final chat response
 # ---------------------------------------------------------------------------
 
 
@@ -404,6 +522,44 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
     ]
     actions_section = "\n".join(action_lines) if action_lines else "  None."
 
+    # Settlement section (only for Ready claims with an extracted bill amount)
+    settlement_section = ""
+    bill_amt = state.get("bill_amount")
+    settle_amt = state.get("settlement_amount")
+    deduction_pct = state.get("deduction_percentage", 0)
+
+    if state.get("is_ready") and settle_amt is not None and bill_amt:
+        settlement_section = "\n💰 **Settlement Details:**\n\n"
+        settlement_section += "| Item | Amount |\n|------|--------|\n"
+        settlement_section += f"| Total Bill Amount | ₹{bill_amt:,.2f} |\n"
+        if deduction_pct and deduction_pct > 0:
+            deduction_amt = bill_amt - settle_amt
+            settlement_section += (
+                f"| Co-payment Deduction ({deduction_pct:.0f}%) | −₹{deduction_amt:,.2f} |\n"
+                f"| **Settlement Amount** | **₹{settle_amt:,.2f}** |\n\n"
+                f"⚠️ The total bill amount exceeds ₹1,00,000, so a "
+                f"**{deduction_pct:.0f}% co-payment deduction** has been applied.\n"
+            )
+        else:
+            settlement_section += f"| **Settlement Amount** | **₹{settle_amt:,.2f}** |\n"
+
+        settlement_section += (
+            "\n🔔 **Would you like to proceed with this claim?**\n\n"
+            "- Reply **'proceed'** or **'yes'** to approve and process the claim "
+            "at the settlement amount shown above.\n"
+            "- Or reply with a **different amount** (e.g. `120000`) if you'd like "
+            "to claim a different amount.\n"
+        )
+
+    # Call-to-action (only when no settlement offer is shown)
+    cta = ""
+    if not settlement_section:
+        cta = (
+            "You can now ask me specific questions about this claim — "
+            "e.g. *'Which documents failed?'*, *'What are the critical issues?'*, "
+            "or *'What should I do next?'*"
+        )
+
     response = (
         f"✅ **Claim `{claim_id}` — Analysis Complete**\n\n"
         f"| Metric | Value |\n"
@@ -418,9 +574,8 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
         f"**Documents Analysed:**\n{docs_section}\n\n"
         f"**Summary:**\n{summary_text}\n\n"
         f"**Top Priority Actions:**\n{actions_section}\n\n"
-        "You can now ask me specific questions about this claim — "
-        "e.g. *'Which documents failed?'*, *'What are the critical issues?'*, "
-        "or *'What should I do next?'*"
+        f"{settlement_section}"
+        f"{cta}"
     )
 
     return {"response_message": response}
@@ -449,6 +604,8 @@ def build_claim_workflow():
     graph.add_node("classify_documents", node_classify_documents)
     graph.add_node("analyze_documents", node_analyze_documents)
     graph.add_node("aggregate", node_aggregate)
+    graph.add_node("extract_bill_amount", node_extract_bill_amount)
+    graph.add_node("calculate_settlement", node_calculate_settlement)
     graph.add_node("format_response", node_format_response)
 
     graph.set_entry_point("validate_claim")
@@ -465,7 +622,9 @@ def build_claim_workflow():
     )
     graph.add_edge("classify_documents", "analyze_documents")
     graph.add_edge("analyze_documents", "aggregate")
-    graph.add_edge("aggregate", "format_response")
+    graph.add_edge("aggregate", "extract_bill_amount")
+    graph.add_edge("extract_bill_amount", "calculate_settlement")
+    graph.add_edge("calculate_settlement", "format_response")
     graph.add_edge("format_response", END)
 
     return graph.compile()
