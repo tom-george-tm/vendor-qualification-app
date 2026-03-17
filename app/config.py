@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     AZURE_OPENAI_DEPLOYMENT_MINI: str = "gpt-4o-mini"   # GPT-4o mini deployment
     AZURE_OPENAI_DEPLOYMENT_GPT4O: str = "gpt-4o"        # GPT-4o deployment
 
+    # Azure Blob Storage
+    AZURE_STORAGE_CONNECTION_STRING: str = ""
+    AZURE_STORAGE_CONTAINER_NAME: str = ""
+    AZURE_STORAGE_CONTAINER_URL: Optional[str] = None
+
     model_config = SettingsConfigDict(env_file='./.env', extra='ignore')
 
 

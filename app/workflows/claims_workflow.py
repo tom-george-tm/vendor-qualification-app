@@ -16,7 +16,6 @@ import asyncio
 import base64
 import json
 import logging
-import os
 import re
 from typing import List, Optional
 
@@ -25,16 +24,17 @@ from langgraph.graph import END, StateGraph
 from openai import AsyncAzureOpenAI
 from typing_extensions import TypedDict
 
+from app.database import ChatSessions, Claims
 from app.config import settings
 from app.document_analysis import build_aggregator_prompt, build_analysis_prompt
+from app.azure_blob import blob_prefix_exists, list_blobs_in_prefix, download_blob
+from app.email import Email
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-DIR = "./temp_uploads"
 
 REQUIRED_DOC_TYPES = ["Bill", "Blood report", "Medical report"]
 
@@ -95,6 +95,7 @@ class ClaimWorkflowState(TypedDict):
 
     # Output
     response_message: str
+    is_analyzed: bool
     error: Optional[str]
 
 
@@ -220,17 +221,17 @@ async def node_validate_claim(state: ClaimWorkflowState) -> dict:
             )
         }
 
-    claim_folder = os.path.join(DIR, claim_id)
-    if not os.path.isdir(claim_folder):
+    claim_prefix = f"{claim_id}/"
+    if not blob_prefix_exists(claim_prefix):
         return {
             "error": (
-                f"No folder found for claim **{claim_id}**. "
+                f"No documents found for claim **{claim_id}** in blob storage. "
                 "Please upload the claim documents first using the upload endpoint."
             )
         }
 
-    logger.info("Claim folder validated: %s", claim_folder)
-    return {"claim_folder": claim_folder, "error": None}
+    logger.info("Claim blob prefix validated: %s", claim_prefix)
+    return {"claim_folder": claim_prefix, "error": None}
 
 
 # ---------------------------------------------------------------------------
@@ -239,22 +240,23 @@ async def node_validate_claim(state: ClaimWorkflowState) -> dict:
 
 
 async def node_load_documents(state: ClaimWorkflowState) -> dict:
-    folder = state["claim_folder"]
-    pdf_files = sorted(f for f in os.listdir(folder) if f.lower().endswith(".pdf"))
+    claim_prefix = state["claim_folder"]  # e.g. "CLAIM_ID_123456/"
+    blob_names = list_blobs_in_prefix(claim_prefix)
+    pdf_blob_names = sorted(b for b in blob_names if b.lower().endswith(".pdf"))
 
-    if not pdf_files:
+    if not pdf_blob_names:
         return {
             "error": (
-                f"No PDF files found in the folder for claim **{state['claim_id']}**. "
+                f"No PDF files found in blob storage for claim **{state['claim_id']}**. "
                 "Please upload at least one PDF and try again."
             )
         }
 
     raw_files: List[RawFile] = []
-    for filename in pdf_files:
-        filepath = os.path.join(folder, filename)
-        with open(filepath, "rb") as fh:
-            raw_files.append({"filename": filename, "content": fh.read()})
+    for blob_name in pdf_blob_names:
+        filename = blob_name.split("/", 1)[1] if "/" in blob_name else blob_name
+        content = download_blob(blob_name)
+        raw_files.append({"filename": filename, "content": content})
 
     logger.info("Loaded %d PDF(s) for claim %s", len(raw_files), state["claim_id"])
     return {"raw_files": raw_files}
@@ -479,7 +481,7 @@ async def node_calculate_settlement(state: ClaimWorkflowState) -> dict:
 async def node_format_response(state: ClaimWorkflowState) -> dict:
     # Error path
     if state.get("error"):
-        return {"response_message": f"⚠️ {state['error']}"}
+        return {"response_message": f"⚠️ {state['error']}", "is_analyzed": False}
 
     claim_id = state["claim_id"]
     missing = state.get("missing_docs", [])
@@ -513,15 +515,16 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
         )
     docs_section = "\n".join(doc_lines) if doc_lines else "  No documents analysed."
 
-    # Top action items
-    actions = agg.get("prioritized_action_items", [])
-    action_lines = [
-        f"  {i + 1}. [{item.get('priority', '')}] {item.get('action', '')} — "
-        f"{str(item.get('description', ''))[:120]}"
-        for i, item in enumerate(actions[:5])
-    ]
-    actions_section = "\n".join(action_lines) if action_lines else "  None."
+    # Detected Issues
+    issues = overall.get("all_detected_issues", [])
+    issues_section = ""
+    if issues:
+        issues_section = "\n\n🚨 **Identified Issues:**\n" + "\n".join([f"  • {issue}" for issue in issues])
 
+    # Coverage & Suggestion
+    coverage = overall.get("coverage_status", "Checking...")
+    suggestion = overall.get("final_suggestion", "N/A")
+    
     # Settlement section (only for Ready claims with an extracted bill amount)
     settlement_section = ""
     bill_amt = state.get("bill_amount")
@@ -543,42 +546,115 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
         else:
             settlement_section += f"| **Settlement Amount** | **₹{settle_amt:,.2f}** |\n"
 
-        settlement_section += (
-            "\n🔔 **Would you like to proceed with this claim?**\n\n"
-            "- Reply **'proceed'** or **'yes'** to approve and process the claim "
-            "at the settlement amount shown above.\n"
-            "- Or reply with a **different amount** (e.g. `120000`) if you'd like "
-            "to claim a different amount.\n"
-        )
-
-    # Call-to-action (only when no settlement offer is shown)
-    cta = ""
-    if not settlement_section:
-        cta = (
-            "You can now ask me specific questions about this claim — "
-            "e.g. *'Which documents failed?'*, *'What are the critical issues?'*, "
-            "or *'What should I do next?'*"
-        )
+    # Call-to-action
+    cta = (
+        f"\n\n👉 **Suggestion: {suggestion}**\n"
+        f"**Do you want to reject or approve this claim?**\n\n"
+        "You can also ask me specific questions like *'What are the critical issues?'* or *'How can I fix the document gaps?'*"
+    )
 
     response = (
         f"✅ **Claim `{claim_id}` — Analysis Complete**\n\n"
         f"| Metric | Value |\n"
         f"|--------|-------|\n"
         f"| Readiness Score | **{overall.get('readiness_score', 'N/A')}/100** |\n"
+        f"| Coverage Status | {coverage} |\n"
         f"| Risk Level | {overall.get('risk_level', 'N/A')} |\n"
         f"| Submission Status | {overall.get('submission_status', 'N/A')} |\n"
         f"| Critical Issues | {overall.get('critical_issues', 0)} |\n"
         f"| Moderate Issues | {overall.get('moderate_issues', 0)} |\n"
-        f"| Minor Issues | {overall.get('minor_issues', 0)} |\n"
-        f"{missing_section}\n\n"
+        f"| Minor Issues | {overall.get('minor_issues', 0)} |"
+        f"{missing_section}"
+        f"{issues_section}\n\n"
         f"**Documents Analysed:**\n{docs_section}\n\n"
         f"**Summary:**\n{summary_text}\n\n"
-        f"**Top Priority Actions:**\n{actions_section}\n\n"
         f"{settlement_section}"
         f"{cta}"
     )
 
-    return {"response_message": response}
+    return {"response_message": response, "is_analyzed": True}
+
+
+# ---------------------------------------------------------------------------
+# Node 9 – Send Email Notification
+# ---------------------------------------------------------------------------
+
+
+async def node_send_email_notification(state: ClaimWorkflowState) -> dict:
+    """Send an email notification when analysis is complete."""
+    if state.get("error") or not state.get("is_analyzed"):
+        return {}
+
+    agg = state.get("aggregated_result", {})
+    overall = agg.get("overall_assessment", {})
+    claim_id = state["claim_id"]
+    decision = overall.get("final_suggestion", "REVIEW_REQUIRED")
+    reasoning = overall.get("coverage_status", "") + "\n" + "\n".join(overall.get("all_detected_issues", []))
+
+    try:
+        email_sender = Email(name="Claims System", url="")
+        await email_sender.send_workflow_notification(
+            filename=claim_id,
+            decision=decision,
+            reasoning=reasoning[:1000]
+        )
+        logger.info("Sent email notification for claim %s", claim_id)
+    except Exception as e:
+        logger.warning("Failed to send email notification for claim %s: %s", claim_id, e)
+
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# Node 10 – Sync Claims Metadata
+# ---------------------------------------------------------------------------
+
+
+async def node_sync_claims_metadata(state: ClaimWorkflowState) -> dict:
+    """Update the central Claims collection with the latest analysis data."""
+    if state.get("error") or not state.get("is_analyzed"):
+        return {}
+
+    agg = state.get("aggregated_result", {})
+    overall = agg.get("overall_assessment", {})
+    proj = agg.get("project_summary", agg.get("claim_summary", {}))
+    claim_id = state["claim_id"]
+
+    try:
+        # 1. Update central Claims collection (primary for dashboard)
+        await Claims.update_one(
+            {"claim_id": claim_id},
+            {
+                "$set": {
+                    "applicant_name": proj.get("applicant_name", "N/A"),
+                    "medical_case": proj.get("medical_case", "N/A"),
+                    "hospital_name": proj.get("hospital_name", "N/A"),
+                    "readiness_score": overall.get("readiness_score", 0),
+                    "risk_level": overall.get("risk_level", "N/A"),
+                    "submission_status": overall.get("submission_status", "Analyzed"),
+                    "is_analyzed": True,
+                }
+            }
+        )
+        logger.info("Synced analysis metadata to Claims collection for %s", claim_id)
+
+        # 2. Update ChatSessions (primary for chat grounding)
+        await ChatSessions.update_one(
+            {"claim_id": claim_id},
+            {
+                "$set": {
+                    "claim_analysis": agg,
+                    "is_analyzed": True
+                }
+            },
+            upsert=True # Create a default session if one doesn't exist for background analysis
+        )
+        logger.info("Synced analysis metadata to ChatSessions for %s", claim_id)
+
+    except Exception as e:
+        logger.warning("Failed to sync analysis metadata for %s: %s", claim_id, e)
+
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +683,8 @@ def build_claim_workflow():
     graph.add_node("extract_bill_amount", node_extract_bill_amount)
     graph.add_node("calculate_settlement", node_calculate_settlement)
     graph.add_node("format_response", node_format_response)
+    graph.add_node("send_email", node_send_email_notification)
+    graph.add_node("sync_metadata", node_sync_claims_metadata)
 
     graph.set_entry_point("validate_claim")
 
@@ -625,7 +703,9 @@ def build_claim_workflow():
     graph.add_edge("aggregate", "extract_bill_amount")
     graph.add_edge("extract_bill_amount", "calculate_settlement")
     graph.add_edge("calculate_settlement", "format_response")
-    graph.add_edge("format_response", END)
+    graph.add_edge("format_response", "send_email")
+    graph.add_edge("send_email", "sync_metadata")
+    graph.add_edge("sync_metadata", END)
 
     return graph.compile()
 

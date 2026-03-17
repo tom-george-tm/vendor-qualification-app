@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form, BackgroundTasks
 from typing import List, Optional
 import asyncio
 import json
@@ -12,17 +12,24 @@ from bson.errors import InvalidId
 from openai import AsyncAzureOpenAI
 import fitz  # PyMuPDF
 
-from app.database import db, ResolvedClaims
+from app.database import db, ResolvedClaims, ChatSessions, Claims
 from app.config import settings
 from app.document_analysis import build_analysis_prompt, build_aggregator_prompt
 from app.schemas import DocumentAnalysisDetail
+from app.workflows.claims_workflow import claim_workflow
+from app.azure_blob import (
+    blob_prefix_exists,
+    list_blobs_in_prefix,
+    list_claim_ids,
+    upload_blob,
+    download_blob,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-
-DIR = "./temp_uploads"  # Temporary directory to save uploaded files
+BLOB_PREFIX = ""  # blobs are stored as "<CLAIM_ID>/<filename>"
 
 
 def generate_claim_id() -> str:
@@ -31,16 +38,49 @@ def generate_claim_id() -> str:
     return f"CLAIM_ID_{unique_number}"
 
 
+async def trigger_background_analysis(claim_id: str):
+    """
+    Trigger the LangGraph workflow in the background to extract details (Applicant Name, etc.)
+    and update the dashboard immediately after upload.
+    """
+    logger.info("Triggering background analysis for claim %s", claim_id)
+    initial_state = {
+        "session_id": f"bg-{claim_id}",  # Background session
+        "claim_id": claim_id,
+        "claim_folder": f"{claim_id}/",
+        "raw_files": [],
+        "classified_files": [],
+        "missing_docs": [],
+        "document_analyses": [],
+        "aggregated_result": {},
+        "bill_amount": None,
+        "settlement_amount": None,
+        "deduction_percentage": 0,
+        "is_ready": False,
+        "response_message": "",
+        "is_analyzed": False,
+        "error": None,
+    }
+    try:
+        await claim_workflow.ainvoke(initial_state)
+        logger.info("Background analysis completed for claim %s", claim_id)
+    except Exception as e:
+        logger.error("Background analysis failed for claim %s: %s", claim_id, e)
+
+
 @router.post("/upload-claim-documents", summary="Upload multiple PDFs for a claim")
-async def upload_claim_documents(files: List[UploadFile] = File(
+async def upload_claim_documents(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(
         ...,
         description="Upload document files (PDF, PNG, JPG)",
         json_schema_extra={"items": {"type": "string", "format": "binary"}},
-    ),):
+    ),
+):
     """
     Upload multiple PDF files for a claim.
-    Creates a unique folder under DIR (e.g. CLAIM_IS_765476) and stores all PDFs in it.
-    Returns the claim ID and list of saved file paths.
+    Creates a unique prefix in Azure Blob Storage (e.g. CLAIM_ID_765476/) and stores all PDFs under it.
+    Returns the claim ID and list of saved blob names.
     """
     # Validate that all uploaded files are PDFs
     for file in files:
@@ -50,63 +90,153 @@ async def upload_claim_documents(files: List[UploadFile] = File(
                 detail=f"File '{file.filename}' is not a PDF. Only PDF files are allowed.",
             )
 
-    # Generate a unique claim folder name, retry if the folder already exists
+    # Generate a unique claim ID, retry if the prefix already exists in blob storage
     claim_id = generate_claim_id()
-    claim_folder = os.path.join(DIR, claim_id)
-    while os.path.exists(claim_folder):
+    while blob_prefix_exists(f"{claim_id}/"):
         claim_id = generate_claim_id()
-        claim_folder = os.path.join(DIR, claim_id)
 
-    os.makedirs(claim_folder, exist_ok=False)
-    logger.info("Created claim folder: %s", claim_folder)
+    logger.info("Created claim prefix: %s/", claim_id)
+
+    # Pre-emptively create claim in DB
+    await Claims.update_one(
+        {"claim_id": claim_id},
+        {
+            "$set": {
+                "claim_id": claim_id,
+                "created_at": datetime.datetime.utcnow(),
+                "applicant_name": "Pending Analysis",
+                "medical_case": "Pending Analysis",
+                "hospital_name": "Pending Analysis",
+                "readiness_score": 0,
+                "risk_level": "N/A",
+                "submission_status": "Not Analyzed",
+                "is_analyzed": False,
+            }
+        },
+        upsert=True,
+    )
 
     saved_files: List[str] = []
     try:
         for file in files:
-            file_path = os.path.join(claim_folder, file.filename)
+            blob_name = f"{claim_id}/{file.filename}"
             contents = await file.read()
-            with open(file_path, "wb") as f:
-                f.write(contents)
-            saved_files.append(file_path)
-            logger.info("Saved file: %s", file_path)
+            upload_blob(blob_name, contents)
+            saved_files.append(blob_name)
+            logger.info("Uploaded blob: %s", blob_name)
+        
+        # Trigger AI analysis in the background
+        background_tasks.add_task(trigger_background_analysis, claim_id)
+        
     except Exception as exc:
-        logger.error("Failed to save files for claim %s: %s", claim_id, exc)
-        raise HTTPException(status_code=500, detail=f"Failed to save files: {exc}")
+        logger.error("Failed to upload files for claim %s: %s", claim_id, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to upload files: {exc}")
 
+    container_url = settings.AZURE_STORAGE_CONTAINER_URL or ""
     return {
         "claim_id": claim_id,
-        "folder": claim_folder,
+        "folder": f"{container_url}/{claim_id}",
         "uploaded_files": saved_files,
         "total_files": len(saved_files),
     }
 
 
-@router.get("/claims", summary="Get all claim folder names")
-def get_all_claims():
+@router.get("/claims", summary="Get all claim folder names and details")
+async def get_all_claims():
     """
-    Returns a list of all claim folder names found under DIR.
-    Only folders whose names start with 'CLAIM_ID_' are included.
+    Returns a list of all claim IDs from the database (sourced from Azure folders),
+    enriched with analysis details.
     """
-    if not os.path.exists(DIR):
+    try:
+        # Use database as primary source
+        cursor = Claims.find({}).sort("created_at", -1)
+        db_claims = [doc async for doc in cursor]
+        
+        # Fallback to Azure if DB is empty (helps during migration)
+        if not db_claims:
+            logger.info("DB Claims empty, falling back to Azure listing")
+            claim_folders = list_claim_ids()
+            db_claims = [{"claim_id": cid} for cid in claim_folders]
+    except Exception as exc:
+        logger.error("Failed to list claims: %s", exc)
         return {"claims": [], "total": 0}
 
-    claim_folders = [
-        name
-        for name in os.listdir(DIR)
-        if os.path.isdir(os.path.join(DIR, name)) and name.startswith("CLAIM_ID_")
-    ]
+    enriched_claims = []
+    for claim_doc in db_claims:
+        cid = claim_doc["claim_id"]
+        
+        # Default details from the claim document
+        details = {
+            "claim_id": cid,
+            "applicant_name": claim_doc.get("applicant_name", "Pending Analysis"),
+            "medical_case": claim_doc.get("medical_case", "Pending Analysis"),
+            "hospital_name": claim_doc.get("hospital_name", "Pending Analysis"),
+            "readiness_score": claim_doc.get("readiness_score", 0),
+            "risk_level": claim_doc.get("risk_level", "N/A"),
+            "submission_status": claim_doc.get("submission_status", "Not Analyzed"),
+            "is_analyzed": claim_doc.get("is_analyzed", False),
+            "created_at": claim_doc.get("created_at")
+        }
 
-    return {"claims": claim_folders, "total": len(claim_folders)}
+        # Check for LATEST analysis in ChatSessions (in case it was updated recently)
+        session_doc = await ChatSessions.find_one({"claim_id": cid})
+        
+        if session_doc and session_doc.get("claim_analysis"):
+            analysis = session_doc["claim_analysis"]
+            proj = analysis.get("project_summary", analysis.get("claim_summary", {}))
+            overall = analysis.get("overall_assessment", {})
+            
+            details["applicant_name"] = proj.get("applicant_name", details["applicant_name"])
+            details["medical_case"] = proj.get("medical_case", details["medical_case"])
+            details["hospital_name"] = proj.get("hospital_name", details["hospital_name"])
+            details["readiness_score"] = overall.get("readiness_score", details["readiness_score"])
+            details["risk_level"] = overall.get("risk_level", details["risk_level"])
+            details["submission_status"] = overall.get("submission_status", "Analyzed")
+            details["is_analyzed"] = True
+
+        enriched_claims.append(details)
+
+    return {"claims": enriched_claims, "total": len(enriched_claims)}
+
+
+@router.post("/sync-existing-claims", summary="Sync MongoDB 'claims' collection with Azure folders")
+async def sync_existing_claims():
+    """
+    One-time utility to ensure every folder in Azure has a record in MongoDB.
+    """
+    try:
+        azure_ids = list_claim_ids()
+        synced = 0
+        for cid in azure_ids:
+            # Check if exists
+            exists = await Claims.find_one({"claim_id": cid})
+            if not exists:
+                # Create base record
+                await Claims.insert_one({
+                    "claim_id": cid,
+                    "created_at": datetime.datetime.utcnow(),
+                    "applicant_name": "Pending Analysis",
+                    "medical_case": "Pending Analysis",
+                    "hospital_name": "Pending Analysis",
+                    "readiness_score": 0,
+                    "risk_level": "N/A",
+                    "submission_status": "Not Analyzed",
+                    "is_analyzed": False
+                })
+                synced += 1
+        return {"status": "success", "azure_folders": len(azure_ids), "new_claims_synced": synced}
+    except Exception as exc:
+        logger.error("Sync failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.get("/claims/{claim_id}/documents", summary="List documents in a claim folder")
 def get_claim_documents(claim_id: str):
     """
-    Returns the list of PDFs currently present in the claim folder,
+    Returns the list of PDFs currently present in the claim blob prefix,
     along with which of the three required document types are missing.
     """
-    claim_folder = os.path.join(DIR, claim_id)
-    if not os.path.isdir(claim_folder):
+    if not blob_prefix_exists(f"{claim_id}/"):
         raise HTTPException(status_code=404, detail=f"Claim '{claim_id}' not found.")
 
     REQUIRED = ["Bill", "Blood report", "Medical report"]
@@ -116,7 +246,13 @@ def get_claim_documents(claim_id: str):
         "Medical report": ["medical", "discharge", "summary", "report", "clinical", "diagnosis", "doctor"],
     }
 
-    files = sorted(f for f in os.listdir(claim_folder) if f.lower().endswith(".pdf"))
+    blob_names = list_blobs_in_prefix(f"{claim_id}/")
+    # Extract just the filename portion, keep only PDFs
+    files = sorted(
+        b.split("/", 1)[1]
+        for b in blob_names
+        if b.lower().endswith(".pdf") and "/" in b
+    )
 
     def _detect(filename: str) -> str:
         lower = filename.lower()
@@ -128,9 +264,10 @@ def get_claim_documents(claim_id: str):
     present_types = {_detect(f) for f in files}
     missing = [dt for dt in REQUIRED if dt not in present_types]
 
+    container_url = settings.AZURE_STORAGE_CONTAINER_URL or ""
     return {
         "claim_id": claim_id,
-        "folder": claim_folder,
+        "folder": f"{container_url}/{claim_id}",
         "files": [
             {"filename": f, "detected_type": _detect(f)}
             for f in files
@@ -151,15 +288,14 @@ async def add_claim_documents(
     ),
 ):
     """
-    Upload additional PDF(s) into an existing claim folder.
+    Upload additional PDF(s) into an existing claim prefix in Azure Blob Storage.
 
-    - The claim folder must already exist (created via POST /upload-claim-documents).
-    - If a file with the same name already exists it will be **overwritten**,
+    - The claim prefix must already exist (created via POST /upload-claim-documents).
+    - If a blob with the same name already exists it will be **overwritten**,
       so you can also use this endpoint to replace a defective document.
     - Returns the updated document list and which types are still missing.
     """
-    claim_folder = os.path.join(DIR, claim_id)
-    if not os.path.isdir(claim_folder):
+    if not blob_prefix_exists(f"{claim_id}/"):
         raise HTTPException(
             status_code=404,
             detail=f"Claim '{claim_id}' not found. Create it first via POST /upload-claim-documents.",
@@ -189,24 +325,29 @@ async def add_claim_documents(
     added_files: List[dict] = []
     try:
         for file in files:
-            file_path = os.path.join(claim_folder, file.filename)
+            blob_name = f"{claim_id}/{file.filename}"
             contents = await file.read()
-            with open(file_path, "wb") as f:
-                f.write(contents)
+            upload_blob(blob_name, contents, overwrite=True)
             added_files.append({"filename": file.filename, "detected_type": _detect(file.filename)})
-            logger.info("Added file to claim %s: %s", claim_id, file_path)
+            logger.info("Added blob to claim %s: %s", claim_id, blob_name)
     except Exception as exc:
         logger.error("Failed to add files to claim %s: %s", claim_id, exc)
-        raise HTTPException(status_code=500, detail=f"Failed to save files: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload files: {exc}")
 
     # Recalculate completeness after upload
-    all_files = sorted(f for f in os.listdir(claim_folder) if f.lower().endswith(".pdf"))
+    blob_names = list_blobs_in_prefix(f"{claim_id}/")
+    all_files = sorted(
+        b.split("/", 1)[1]
+        for b in blob_names
+        if b.lower().endswith(".pdf") and "/" in b
+    )
     present_types = {_detect(f) for f in all_files}
     missing = [dt for dt in REQUIRED if dt not in present_types]
 
+    container_url = settings.AZURE_STORAGE_CONTAINER_URL or ""
     return {
         "claim_id": claim_id,
-        "folder": claim_folder,
+        "folder": f"{container_url}/{claim_id}",
         "added_files": added_files,
         "all_files": [
             {"filename": f, "detected_type": _detect(f)}

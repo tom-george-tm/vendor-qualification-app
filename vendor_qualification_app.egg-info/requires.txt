@@ -1,0 +1,15 @@
+email-validator>=2.3.0
+fastapi>=0.135.1
+httpx>=0.28.1
+jinja2>=3.1.6
+motor>=3.7.1
+openai>=2.26.0
+pydantic>=2.12.5
+pydantic-settings>=2.13.1
+pymongo>=4.16.0
+pymupdf>=1.27.2
+python-dotenv>=1.2.2
+python-multipart>=0.0.22
+uvicorn[standard]>=0.41.0
+langgraph>=0.2.0
+reportlab>=4.4.10

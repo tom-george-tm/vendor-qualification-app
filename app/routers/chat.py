@@ -9,11 +9,11 @@ import json
 import logging
 
 import os
-import shutil
 
 from app.database import Results, ChatSessions, ResolvedClaims
 from app.config import settings
-from app.workflows.claims_workflow import claim_workflow, REQUIRED_DOC_TYPES, DIR as CLAIMS_UPLOAD_DIR
+from app.workflows.claims_workflow import claim_workflow, REQUIRED_DOC_TYPES
+from app.azure_blob import list_blobs_in_prefix, _get_container_client
 
 logger = logging.getLogger(__name__)
 
@@ -467,15 +467,18 @@ async def send_claim_message(body: ChatRequest):
                     custom_amount = None
 
         if is_proceed:
-            # ── Process claim at settlement amount & delete folder ──
+            # ── Process claim at settlement amount & delete blobs ──
             s_claim_id = settlement_info.get("claim_id", "")
             s_amount = settlement_info.get("settlement_amount", 0)
             s_bill_amount = settlement_info.get("bill_amount", 0)
             s_deduction_pct = settlement_info.get("deduction_percentage", 0)
-            claim_folder = os.path.join(CLAIMS_UPLOAD_DIR, s_claim_id)
-            if os.path.isdir(claim_folder):
-                shutil.rmtree(claim_folder)
-                logger.info("Deleted claim folder after approval: %s", claim_folder)
+            try:
+                container = _get_container_client()
+                for blob_name in list_blobs_in_prefix(f"{s_claim_id}/"):
+                    container.delete_blob(blob_name)
+                logger.info("Deleted all blobs for claim %s after approval.", s_claim_id)
+            except Exception as _e:
+                logger.warning("Could not delete blobs for claim %s: %s", s_claim_id, _e)
 
             # Persist resolved claim to DB
             await ResolvedClaims.update_one(
@@ -512,15 +515,18 @@ async def send_claim_message(body: ChatRequest):
             has_data = True
 
         elif custom_amount is not None and custom_amount > 0:
-            # ── Process claim at user-specified amount & delete folder ──
+            # ── Process claim at user-specified amount & delete blobs ──
             s_claim_id = settlement_info.get("claim_id", "")
             s_bill_amount = settlement_info.get("bill_amount", 0)
             s_deduction_pct = settlement_info.get("deduction_percentage", 0)
             original_amt = settlement_info.get("settlement_amount", 0)
-            claim_folder = os.path.join(CLAIMS_UPLOAD_DIR, s_claim_id)
-            if os.path.isdir(claim_folder):
-                shutil.rmtree(claim_folder)
-                logger.info("Deleted claim folder after custom-amount approval: %s", claim_folder)
+            try:
+                container = _get_container_client()
+                for blob_name in list_blobs_in_prefix(f"{s_claim_id}/"):
+                    container.delete_blob(blob_name)
+                logger.info("Deleted all blobs for claim %s after custom-amount approval.", s_claim_id)
+            except Exception as _e:
+                logger.warning("Could not delete blobs for claim %s: %s", s_claim_id, _e)
 
             # Persist resolved claim to DB
             await ResolvedClaims.update_one(

@@ -70,7 +70,7 @@ Return ONLY the following JSON structure, exact keys and data types, no markdown
   "document_type": "{doc_type}",
   "document_status": "Reviewed",
   "risk_level": "Low" | "Moderate" | "High" | "Critical",
-  "decision_reasoning": "<paragraph explaining the evaluation result>",
+  "decision_reasoning": "<paragraph explaining the evaluation result, EXPLICITLY listing all issues or discrepancies found>",
   "recommendations": [
     "<string actionable recommendation 1>",
     "<string actionable recommendation 2>"
@@ -78,8 +78,9 @@ Return ONLY the following JSON structure, exact keys and data types, no markdown
   "checklist_results": [
     {{
       "criterion": "<the checklist item question or description>",
+      "status": "Pass" | "Fail" | "Warning",
       "risk_level": "NA" | "minor" | "moderate" | "critical",
-      "explanation": "<short explanation for the risk level if not NA>"
+      "explanation": "<EXPLICIT detail on why it failed or passed>"
     }}
   ]
 }}"""
@@ -107,10 +108,12 @@ The mandatory documents for this claim type are:
 CRITICAL REQUIREMENTS:
 1. If any of the three mandatory documents are missing from the input, set the Overall Risk Level to "High" or "Critical".
 2. Perform "Cross-Document Validation": Check for consistency between documents (e.g., applicant name in Bill vs Medical report, dates, hospital names).
-3. Identify "Critical", "Moderate", and "Minor" issues across all documentation.
-4. Provide a prioritized action list and immediate next steps.
-5. IMPORTANT — Medical case cross-validation: A document may state the DIAGNOSIS (e.g. "Acute Appendicitis") while another states the PROCEDURE/TREATMENT (e.g. "Laparoscopic Appendectomy"). These are complementary terms for the same clinical event and must NOT be flagged as a mismatch. Only flag a mismatch if the underlying medical condition is genuinely different across documents.
-6. IMPORTANT — Date validation: use TODAY'S DATE as the only reference. A bill dated after the admission date and on or before today is valid. Do NOT flag a date as future if it is on or before {today_str}.
+3. Identify ALL "Critical", "Moderate", and "Minor" issues across all documentation.
+4. Determine Coverage Status: Based on document validity and completeness, specify if the claim appears "Fully Covered", "Partially Covered" (estimate percentage if possible), or "Not Covered".
+5. Provide a Clear Suggestion: Suggest whether the user should "APPROVE" or "REJECT" the claim based on the findings.
+6. Provide a prioritized action list and immediate next steps.
+7. IMPORTANT — Medical case cross-validation: A document may state the DIAGNOSIS (e.g. "Acute Appendicitis") while another states the PROCEDURE/TREATMENT (e.g. "Laparoscopic Appendectomy"). These are complementary terms for the same clinical event and must NOT be flagged as a mismatch. Only flag a mismatch if the underlying medical condition is genuinely different across documents.
+8. IMPORTANT — Date validation: use TODAY'S DATE as the only reference. A bill dated after the admission date and on or before today is valid. Do NOT flag a date as future if it is on or before {today_str}.
 
 Return ONLY the following JSON structure, exact keys and data types, no markdown blocks:
 
@@ -124,34 +127,39 @@ Return ONLY the following JSON structure, exact keys and data types, no markdown
     "documents_analyzed": <count>
   }},
   "overall_assessment": {{
-    "readiness_score": <integer 0-100 indicating likelihood of claim approval>,
+    "readiness_score": <integer 0-100>,
     "risk_level": "Low" | "Moderate" | "High" | "Critical",
     "submission_status": "Ready" | "Not Ready",
+    "coverage_status": "Fully Covered" | "Partially Covered (X%)" | "Not Covered",
+    "final_suggestion": "APPROVE" | "REJECT" | "MORE_INFO_NEEDED",
+    "all_detected_issues": [
+      "<EXPLICIT list of every issue found across all docs>"
+    ],
     "documents_analyzed": <count>,
     "critical_issues": <count>,
     "moderate_issues": <count>,
     "minor_issues": <count>
   }},
   "ai_summary": {{
-    "summary_text": "<executive summary of insurance claim readiness, highlighting key risks and inconsistencies>"
+    "summary_text": "<executive summary emphasizing risks, issues, and coverage level>"
   }},
   "document_analysis": [
-     // Include the individual document results here, slightly refined if needed
+     // Include the individual document results here
   ],
   "cross_document_validation": [
     {{
-      "validation_type": "<e.g., 'Applicant Name Consistency', 'Date Consistency', 'Hospital Name Consistency'>",
+      "validation_type": "<e.g., 'Applicant Name Consistency'>",
       "documents_compared": ["Doc A", "Doc B"],
       "result": "Match" | "Mismatch" | "Warning",
-      "details": "<explanation of the cross-check result>",
+      "details": "<explanation>",
       "risk_level": "Low" | "Moderate" | "High" | "Critical"
     }}
   ],
   "prioritized_action_items": [
     {{
-      "priority": <integer 1, 2, 3...>,
-      "action": "<short title of action>",
-      "description": "<detailed instruction on how to resolve the issue>"
+      "priority": <number>,
+      "action": "<title>",
+      "description": "<detailed instruction>"
     }}
   ],
   "next_steps": [
