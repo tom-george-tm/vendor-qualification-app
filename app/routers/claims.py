@@ -186,8 +186,17 @@ async def get_all_claims():
         
         if session_doc and session_doc.get("claim_analysis"):
             analysis = session_doc["claim_analysis"]
+            
+            # Skip claims that failed during background analysis (e.g. JSON errors)
+            if "error" in analysis or not analysis.get("overall_assessment"):
+                continue
+
+            # Skip claims where analysis completed but returned no meaningful data
             proj = analysis.get("project_summary", analysis.get("claim_summary", {}))
             overall = analysis.get("overall_assessment", {})
+            applicant = proj.get("applicant_name", "N/A")
+            if applicant in ("N/A", "Pending Analysis", "", None):
+                continue
             
             details["applicant_name"] = proj.get("applicant_name", details["applicant_name"])
             details["medical_case"] = proj.get("medical_case", details["medical_case"])
@@ -196,6 +205,14 @@ async def get_all_claims():
             details["risk_level"] = overall.get("risk_level", details["risk_level"])
             details["submission_status"] = overall.get("submission_status", "Analyzed")
             details["is_analyzed"] = True
+
+        # At the end of the loop, before appending
+        if (
+            details["is_analyzed"]
+            and details["applicant_name"] in ("N/A", "Pending Analysis", "", None)
+            and details["medical_case"] in ("N/A", "Pending Analysis", "", None)
+        ):
+            continue  # Skip ghost claims with no real data
 
         enriched_claims.append(details)
 
