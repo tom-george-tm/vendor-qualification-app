@@ -123,7 +123,7 @@ async def aggregate_results_with_openai(all_doc_results: List[dict]) -> dict:
                 {"role": "user", "content": f"Aggregate the following document analyses:\n\n{input_data}"},
             ],
             temperature=0.1,
-            max_tokens=2048,
+            max_tokens=8192,
             response_format={"type": "json_object"},
         )
         result_text = response.choices[0].message.content or "{}"
@@ -204,36 +204,48 @@ async def upload_files(
         doc["db_id"] = parent_id
 
     # --- Step 6: Email notification (non-blocking, best-effort) ---
-    if settings.GMAIL_CLIENT_ID and settings.GMAIL_REFRESH_TOKEN and settings.GMAIL_TO:
-        try:
-            overall = aggregated_response.get("overall_assessment", {})
-            submission_status = overall.get("submission_status", "").upper()
-            readiness_score = overall.get("readiness_score", 0)
+    try:
+        overall = aggregated_response.get("overall_assessment", {})
+        submission_status = overall.get("submission_status", "").upper()
+        readiness_score = overall.get("readiness_score", 0)
 
-            if submission_status in ("APPROVED", "APPROVE") or readiness_score >= 80:
-                decision = "APPROVE"
-            elif submission_status in ("REJECTED", "REJECT") or readiness_score < 40:
-                decision = "REJECT"
-            else:
-                decision = None
+        if submission_status in ("APPROVED", "APPROVE") or readiness_score >= 80:
+            decision = "APPROVE"
+        elif submission_status in ("REJECTED", "REJECT") or readiness_score < 40:
+            decision = "REJECT"
+        else:
+            decision = None
 
-            if decision:
-                project_name = proj_summ.get("project_name", vendor_name)
-                reasoning = overall.get(
-                    "ai_summary",
-                    aggregated_response.get("ai_summary", "See full report for details."),
+        if decision:
+            applicant_name = proj_summ.get("applicant_name", vendor_name)
+            policy_number = proj_summ.get("policy_number", "[Policy Number]")
+            claim_id = aggregated_response.get("session_id", "N/A")
+            
+            reasoning = overall.get(
+                "ai_summary",
+                aggregated_response.get("ai_summary", "See full report for details.")
+            )
+            if isinstance(reasoning, dict):
+                reasoning = reasoning.get("summary_text", "See full report for details.")
+                
+            if decision == "APPROVE":
+                email_sender = Email(name=applicant_name, url="")
+                await email_sender.send_approval_email(
+                    claim_id=claim_id,
+                    applicant_name=applicant_name,
+                    policy_number=policy_number,
+                    reasoning=reasoning[:1000]
                 )
-                email_sender = Email(name=vendor_name, url="")
-                await email_sender.send_workflow_notification(
-                    filename=project_name,
-                    decision=decision,
-                    reasoning=str(reasoning)[:500],
+            elif decision == "REJECT":
+                email_sender = Email(name=applicant_name, url="")
+                await email_sender.send_rejection_email(
+                    claim_id=claim_id,
+                    applicant_name=applicant_name,
+                    policy_number=policy_number,
+                    reasoning=reasoning[:1000]
                 )
-        except Exception as email_err:
-            logger.warning("Email notification failed: %s", email_err)
-
-    aggregated_response["created_at"] = now.isoformat()
-    return aggregated_response
+    except Exception as email_err:
+        logger.warning("Email notification failed: %s", email_err)
 
 
 @router.get("/results")

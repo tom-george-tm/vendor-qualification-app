@@ -348,7 +348,7 @@ async def node_aggregate(state: ClaimWorkflowState) -> dict:
                 },
             ],
             temperature=0.1,
-            max_tokens=2048,
+            max_tokens=8192,
             response_format={"type": "json_object"},
         )
         aggregated: dict = json.loads(response.choices[0].message.content or "{}")
@@ -587,18 +587,38 @@ async def node_send_email_notification(state: ClaimWorkflowState) -> dict:
 
     agg = state.get("aggregated_result", {})
     overall = agg.get("overall_assessment", {})
+    proj = agg.get("claim_summary", agg.get("project_summary", {}))
+    
     claim_id = state["claim_id"]
-    decision = overall.get("final_suggestion", "REVIEW_REQUIRED")
+    decision = overall.get("final_suggestion", "MORE_INFO_NEEDED").upper()
     reasoning = overall.get("coverage_status", "") + "\n" + "\n".join(overall.get("all_detected_issues", []))
+    applicant_name = proj.get("applicant_name", "Customer")
+    
+    # If the AI extraction doesn't provide a policy number, default it to a placeholder
+    policy_number = proj.get("policy_number", "[Policy Number]")
 
     try:
-        email_sender = Email(name="Claims System", url="")
-        await email_sender.send_workflow_notification(
-            filename=claim_id,
-            decision=decision,
-            reasoning=reasoning[:1000]
-        )
-        logger.info("Sent email notification for claim %s", claim_id)
+        email_sender = Email(name=applicant_name, url="")
+        
+        if "APPROVE" in decision:
+            await email_sender.send_approval_email(
+                claim_id=claim_id,
+                applicant_name=applicant_name,
+                policy_number=policy_number,
+                reasoning=reasoning[:1000]
+            )
+            logger.info("Sent approval email notification for claim %s", claim_id)
+        elif "REJECT" in decision:
+            await email_sender.send_rejection_email(
+                claim_id=claim_id,
+                applicant_name=applicant_name,
+                policy_number=policy_number,
+                reasoning=reasoning[:1000]
+            )
+            logger.info("Sent rejection email notification for claim %s", claim_id)
+        else:
+            logger.info("Decision is %s. No approval/rejection email sent for claim %s", decision, claim_id)
+            
     except Exception as e:
         logger.warning("Failed to send email notification for claim %s: %s", claim_id, e)
 
