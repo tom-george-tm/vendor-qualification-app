@@ -422,3 +422,16 @@ async def get_resolved_claim(claim_id: str):
             detail=f"No resolved claim found with ID '{claim_id}'.",
         )
     return _serialize(doc)
+
+@router.get("/claim/{claim_id}", summary="Get a single claim by ID")
+async def get_claim(claim_id: str):
+    """
+    Returns details of a claim from the Claims collection by claim_id.
+    """
+    doc = await Claims.find_one({"claim_id": claim_id})
+    if not doc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No claim found with ID '{claim_id}'.",
+        )
+    return _serialize(doc)
