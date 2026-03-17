@@ -70,7 +70,6 @@ async def trigger_background_analysis(claim_id: str):
 
 @router.post("/upload-claim-documents", summary="Upload multiple PDFs for a claim")
 async def upload_claim_documents(
-    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(
         ...,
         description="Upload document files (PDF, PNG, JPG)",
@@ -104,9 +103,9 @@ async def upload_claim_documents(
             "$set": {
                 "claim_id": claim_id,
                 "created_at": datetime.datetime.utcnow(),
-                "applicant_name": "Pending Analysis",
-                "medical_case": "Pending Analysis",
-                "hospital_name": "Pending Analysis",
+                "applicant_name": "Aravinth Kumar",
+                "medical_case": "Fractured Arm",
+                "hospital_name": "Apollo Hospital",
                 "readiness_score": 0,
                 "risk_level": "N/A",
                 "submission_status": "Not Analyzed",
@@ -126,7 +125,7 @@ async def upload_claim_documents(
             logger.info("Uploaded blob: %s", blob_name)
         
         # Trigger AI analysis in the background
-        background_tasks.add_task(trigger_background_analysis, claim_id)
+        await trigger_background_analysis(claim_id)
         
     except Exception as exc:
         logger.error("Failed to upload files for claim %s: %s", claim_id, exc)
@@ -150,15 +149,19 @@ async def get_all_claims():
     try:
         # Use database as primary source
         cursor = Claims.find({}).sort("created_at", -1)
+        print("Fetching claims from DB",cursor)
         db_claims = [doc async for doc in cursor]
+        print(f"Found {db_claims} claims in DB")
         
         # Fallback to Azure if DB is empty (helps during migration)
         if not db_claims:
             logger.info("DB Claims empty, falling back to Azure listing")
+            print("DB Claims empty, falling back to Azure listing")
             claim_folders = list_claim_ids()
             db_claims = [{"claim_id": cid} for cid in claim_folders]
     except Exception as exc:
         logger.error("Failed to list claims: %s", exc)
+        print(f"Failed to list claims: {exc}")
         return {"claims": [], "total": 0}
 
     enriched_claims = []
