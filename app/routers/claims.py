@@ -12,7 +12,7 @@ from bson.errors import InvalidId
 from openai import AsyncAzureOpenAI
 import fitz  # PyMuPDF
 
-from app.database import db
+from app.database import db, ResolvedClaims
 from app.config import settings
 from app.document_analysis import build_analysis_prompt, build_aggregator_prompt
 from app.schemas import DocumentAnalysisDetail
@@ -221,3 +221,60 @@ async def add_claim_documents(
             else f"⚠️ Still missing: {', '.join(missing)}. Upload them to complete the claim."
         ),
     }
+
+
+def _serialize(doc: dict) -> dict:
+    """Recursively convert a MongoDB document to a JSON-serialisable dict."""
+    result = {}
+    for k, v in doc.items():
+        if k == "_id":
+            result[k] = str(v)
+        elif isinstance(v, datetime.datetime):
+            result[k] = v.isoformat()
+        elif isinstance(v, dict):
+            result[k] = _serialize(v)
+        elif isinstance(v, list):
+            result[k] = [_serialize(i) if isinstance(i, dict) else i for i in v]
+        else:
+            result[k] = v
+    return result
+
+
+@router.get("/resolved-claims", summary="List all resolved (processed) claims")
+async def get_resolved_claims(
+    skip: int = 0,
+    limit: int = 50,
+):
+    """
+    Returns all claims that have been approved and processed through the chat.
+    Results are sorted by most-recently resolved first.
+    Use `skip` and `limit` for pagination.
+    """
+    cursor = ResolvedClaims.find(
+        {},
+        {"claim_analysis": 0},  # exclude heavy nested analysis by default
+    ).sort("resolved_at", -1).skip(skip).limit(limit)
+
+    claims = [_serialize(doc) async for doc in cursor]
+    total = await ResolvedClaims.count_documents({})
+
+    return {
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "resolved_claims": claims,
+    }
+
+
+@router.get("/resolved-claims/{claim_id}", summary="Get a single resolved claim by ID")
+async def get_resolved_claim(claim_id: str):
+    """
+    Returns full details of a resolved claim including the embedded claim analysis.
+    """
+    doc = await ResolvedClaims.find_one({"claim_id": claim_id})
+    if not doc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No resolved claim found with ID '{claim_id}'.",
+        )
+    return _serialize(doc)

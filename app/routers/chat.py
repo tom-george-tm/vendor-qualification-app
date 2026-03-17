@@ -11,7 +11,7 @@ import logging
 import os
 import shutil
 
-from app.database import Results, ChatSessions
+from app.database import Results, ChatSessions, ResolvedClaims
 from app.config import settings
 from app.workflows.claims_workflow import claim_workflow, REQUIRED_DOC_TYPES, DIR as CLAIMS_UPLOAD_DIR
 
@@ -450,12 +450,15 @@ async def send_claim_message(body: ChatRequest):
     if settlement_pending and settlement_info:
         user_msg = body.message.strip()
         user_msg_lower = user_msg.lower()
+        print("User message during settlement pending:", user_msg)
         proceed_keywords = {"yes", "proceed", "approve", "accept", "confirm", "ok", "okay"}
         is_proceed = bool(proceed_keywords & set(user_msg_lower.split()))
+        print("Is user accepting settlement?", is_proceed)
 
         # Try to parse a custom numeric amount
         custom_amount: Optional[float] = None
         if not is_proceed:
+            print("Checking for custom amount in user message", user_msg)
             amt_match = re.search(r"(\d[\d,]*\.?\d*)", user_msg.replace(" ", ""))
             if amt_match:
                 try:
@@ -467,14 +470,36 @@ async def send_claim_message(body: ChatRequest):
             # ── Process claim at settlement amount & delete folder ──
             s_claim_id = settlement_info.get("claim_id", "")
             s_amount = settlement_info.get("settlement_amount", 0)
+            s_bill_amount = settlement_info.get("bill_amount", 0)
+            s_deduction_pct = settlement_info.get("deduction_percentage", 0)
             claim_folder = os.path.join(CLAIMS_UPLOAD_DIR, s_claim_id)
             if os.path.isdir(claim_folder):
                 shutil.rmtree(claim_folder)
                 logger.info("Deleted claim folder after approval: %s", claim_folder)
 
+            # Persist resolved claim to DB
+            await ResolvedClaims.update_one(
+                {"claim_id": s_claim_id},
+                {
+                    "$set": {
+                        "claim_id": s_claim_id,
+                        "session_id": body.session_id,
+                        "resolved_at": now,
+                        "resolution_type": "approved",
+                        "bill_amount": s_bill_amount,
+                        "deduction_percentage": s_deduction_pct,
+                        "settlement_amount": s_amount,
+                        "final_amount": s_amount,
+                        "claim_analysis": stored_analysis or {},
+                    }
+                },
+                upsert=True,
+            )
+            logger.info("Saved resolved claim %s to DB.", s_claim_id)
+
             response_msg = (
                 f"\u2705 **Claim `{s_claim_id}` \u2014 Processed Successfully!**\n\n"
-                f"\ud83d\udcb0 Settlement amount of **\u20b9{s_amount:,.2f}** has been approved "
+                f"\U0001F4B0 Settlement amount of **\u20b9{s_amount:,.2f}** has been approved "
                 f"and processed.\n\n"
                 "The claim documents have been archived and removed.\n\n"
                 "Thank you for using the Claim Analysis Assistant! "
@@ -482,22 +507,44 @@ async def send_claim_message(body: ChatRequest):
             )
             await ChatSessions.update_one(
                 {"session_id": body.session_id},
-                {"$set": {"settlement_pending": False}},
+                {"$set": {"settlement_pending": False, "claim_analysis": None}},
             )
             has_data = True
 
         elif custom_amount is not None and custom_amount > 0:
             # ── Process claim at user-specified amount & delete folder ──
             s_claim_id = settlement_info.get("claim_id", "")
+            s_bill_amount = settlement_info.get("bill_amount", 0)
+            s_deduction_pct = settlement_info.get("deduction_percentage", 0)
             original_amt = settlement_info.get("settlement_amount", 0)
             claim_folder = os.path.join(CLAIMS_UPLOAD_DIR, s_claim_id)
             if os.path.isdir(claim_folder):
                 shutil.rmtree(claim_folder)
                 logger.info("Deleted claim folder after custom-amount approval: %s", claim_folder)
 
+            # Persist resolved claim to DB
+            await ResolvedClaims.update_one(
+                {"claim_id": s_claim_id},
+                {
+                    "$set": {
+                        "claim_id": s_claim_id,
+                        "session_id": body.session_id,
+                        "resolved_at": now,
+                        "resolution_type": "custom_amount",
+                        "bill_amount": s_bill_amount,
+                        "deduction_percentage": s_deduction_pct,
+                        "settlement_amount": original_amt,
+                        "final_amount": custom_amount,
+                        "claim_analysis": stored_analysis or {},
+                    }
+                },
+                upsert=True,
+            )
+            logger.info("Saved resolved claim %s to DB (custom amount).", s_claim_id)
+
             response_msg = (
                 f"\u2705 **Claim `{s_claim_id}` \u2014 Processed with Custom Amount!**\n\n"
-                f"\ud83d\udcb0 Your custom claim amount of **\u20b9{custom_amount:,.2f}** has been "
+                f"\U0001F4B0 Your custom claim amount of **\u20b9{custom_amount:,.2f}** has been "
                 f"accepted and processed.\n"
                 f"*(Original settlement amount was \u20b9{original_amt:,.2f})*\n\n"
                 "The claim documents have been archived and removed.\n\n"
@@ -506,7 +553,7 @@ async def send_claim_message(body: ChatRequest):
             )
             await ChatSessions.update_one(
                 {"session_id": body.session_id},
-                {"$set": {"settlement_pending": False}},
+                {"$set": {"settlement_pending": False, "claim_analysis": None}},
             )
             has_data = True
 
@@ -700,3 +747,26 @@ async def get_session_analysis(session_id: str):
     if not analysis:
         return {"has_analysis_data": False, "data": None}
     return {"has_analysis_data": True, "data": analysis}
+
+
+@router.get("/claim/{claim_id}/messages")
+async def get_messages_by_claim_id(claim_id: str):
+    """
+    Return the full message history for the session that processed the given Claim ID.
+    The claim_id is stored on the session document when the LangGraph workflow runs.
+    """
+    session = await ChatSessions.find_one({"claim_id": claim_id})
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No session found for claim ID '{claim_id}'.",
+        )
+
+    created_at = session.get("created_at")
+    return {
+        "claim_id": claim_id,
+        "session_id": session.get("session_id"),
+        "created_at": created_at.isoformat() if isinstance(created_at, datetime) else created_at,
+        "total_messages": len(session.get("messages", [])),
+        "messages": session.get("messages", []),
+    }
