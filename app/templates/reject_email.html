@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: sans-serif; color: #333; line-height: 1.6; }
+        .container { padding: 20px; max-width: 600px; margin: auto; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <p>Dear {{ applicant_name }},</p>
+    
+    <p>We hope you are doing well.</p>
+    
+    <p>We regret to inform you that after a thorough review of your recent claim submitted under policy number <strong>{{ policy_number }}</strong> (Claim ID: {{ claim_id }}), we are unable to approve the same.</p>
+    
+    <p>The reason for this decision is that {{ reasoning }}</p>
+    
+    <p>We understand that this may be disappointing, and we sincerely appreciate your understanding in this matter. Should you require further clarification on the policy coverage or wish to review alternative options, please feel free to reach out to us.</p>
+    
+    <p>Thank you for your continued trust in us.</p>
+    
+    <p>Warm regards,<br>
+    <strong>Claims Review Team</strong><br>
+    Pure Insurance<br>
+    support@pureinsurance.com</p>
+</div>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container" style="padding: 20px; font-family: sans-serif; max-width: 600px; margin: auto;">
+    <h2 style="color: #2c3e50;">Information Request for Claim {{ claim_id }}</h2>
+    <p>Dear {{ provider_name }},</p>
+    
+    <p>We are currently reviewing the submitted claim <strong>{{ claim_id }}</strong>. During our assessment, we identified that some required information is missing. We need these details to complete the claim assessment.</p>
+    
+    <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #ffeeba; border-left: 5px solid #ffc107;">
+        <h3 style="margin-top: 0; color: #856404;">Missing Documents / Information:</h3>
+        <ul style="color: #856404;">
+            {% for doc in missing_documents %}
+            <li><strong>{{ doc }}</strong></li>
+            {% endfor %}
+        </ul>
+    </div>
+    
+    <p>Could you please provide the above documents at your earliest convenience? This will allow us to resume processing the claim without further delay.</p>
+    <p>Thank you for your prompt assistance and cooperation.</p>
+    <br>
+    <p>Best regards,<br>
+    <strong>Claims Review Team</strong><br>
+    </p>
+</div>
+{% endblock %}

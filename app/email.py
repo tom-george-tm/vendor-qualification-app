@@ -1,7 +1,7 @@
-import base64
-import time
-import httpx
-from typing import List, Dict, Any, Optional
+import smtplib
+from email.message import EmailMessage
+import asyncio
+from typing import List, Optional
 from .config import settings
 from jinja2 import Environment, select_autoescape, PackageLoader
 
@@ -13,80 +13,43 @@ env = Environment(
 )
 
 
-class GmailAPI:
+class SMTPEmailAPI:
     """
-    Gmail API logic for sending emails and refreshing tokens.
+    Standard SMTP logic for sending emails.
     """
-    GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
-    TOKEN_URL = "https://oauth2.googleapis.com/token"
-
     def __init__(self):
-        self.client_id = settings.GMAIL_CLIENT_ID
-        self.client_secret = settings.GMAIL_CLIENT_SECRET
-        self.refresh_token = settings.GMAIL_REFRESH_TOKEN
-        self.access_token = settings.GMAIL_ACCESS_TOKEN
-        self.expire_time = settings.GMAIL_EXPIRE_TIME
+        self.host = "smtp.gmail.com"
+        self.port = 587
+        self.username = "pridhviraj9248@gmail.com"
+        self.password = "njoi wrbt kkoc puls"
+        self.from_email = self.username
 
-    async def _refresh_access_token(self) -> str:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                self.TOKEN_URL,
-                data={
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "refresh_token": self.refresh_token,
-                    "grant_type": "refresh_token",
-                },
-            )
-            response.raise_for_status()
+    def _send_email_sync(self, recipients: List[str], subject: str, html_body: str):
+        if not self.username or not self.password:
+            print("SMTP Error: EMAIL_USERNAME or EMAIL_PASSWORD is not set in environment.")
+            return
 
-        data = response.json()
-        self.access_token = data["access_token"]
-        self.expire_time = int(time.time()) + int(data.get("expires_in", 3600))
-        
-        # Note: We don't persist expire_time/access_token back to .env here, 
-        # but the Gmail Tool usually handles this or does it per execution.
-        return self.access_token
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = self.from_email
+        msg['To'] = ", ".join(recipients)
+        msg.set_content("Please enable HTML to view this email.")
+        msg.add_alternative(html_body, subtype='html')
 
-    async def _get_valid_access_token(self) -> str:
-        if not self.access_token or time.time() >= self.expire_time - 60:
-            return await self._refresh_access_token()
-        return self.access_token
+        try:
+            with smtplib.SMTP(self.host, self.port) as server:
+                server.ehlo()
+                server.starttls()
+                server.login(self.username, self.password)
+                server.send_message(msg)
+                print(f"Email successfully sent to {msg['To']}")
+        except Exception as e:
+            print(f"SMTP Error: Failed to send email: {e}")
+            raise e
 
     async def send_email(self, recipients: List[str], subject: str, html_body: str):
-        token = await self._get_valid_access_token()
-        
-        # Build the message
-        # Basic MIME-like format for Gmail 'raw' sending
-        to_header = ", ".join(recipients)
-        message_parts = [
-            f"To: {to_header}",
-            f"Subject: {subject}",
-            "MIME-Version: 1.0",
-            "Content-Type: text/html; charset=utf-8",
-            "",
-            html_body
-        ]
-        raw_message = "\n".join(message_parts)
-
-        encoded_message = base64.urlsafe_b64encode(
-            raw_message.encode("utf-8")
-        ).decode("utf-8")
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                self.GMAIL_SEND_URL,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                json={"raw": encoded_message},
-            )
-            
-        if response.status_code != 200:
-            print(f"Gmail Error: {response.text}")
-        response.raise_for_status()
-        return response.json()
+        # Run the synchronous SMTP call in a separate thread so it doesn't block FastAPI
+        await asyncio.to_thread(self._send_email_sync, recipients, subject, html_body)
 
 
 class Email:
@@ -94,7 +57,7 @@ class Email:
         self.name = name
         self.url = url
         self.email = email or [settings.GMAIL_TO]
-        self.gmail_api = GmailAPI()
+        self.smtp_api = SMTPEmailAPI()
 
     async def sendMail(self, subject: str, template_name: str, **kwargs):
         # Generate the HTML template
@@ -108,19 +71,44 @@ class Email:
         )
 
         try:
-            await self.gmail_api.send_email(
+            await self.smtp_api.send_email(
                 recipients=self.email,
                 subject=subject,
                 html_body=html
             )
         except Exception as e:
-            print(f"Failed to send email via Gmail API: {e}")
+            print(f"Failed to send email via SMTP API: {e}")
 
-    async def send_workflow_notification(self, filename: str, decision: str, reasoning: str):
+    async def send_approval_email(self, claim_id: str, applicant_name: str, policy_number: str, reasoning: str = ""):
         await self.sendMail(
-            subject=f'Workflow Update: {decision} for {filename}',
-            template_name='workflow_notification',
-            filename=filename,
-            decision=decision,
+            subject=f'Claim Approved: {claim_id}',
+            template_name='approve_email',
+            claim_id=claim_id,
+            applicant_name=applicant_name,
+            policy_number=policy_number,
             reasoning=reasoning
         )
+
+    async def send_rejection_email(self, claim_id: str, applicant_name: str, policy_number: str, reasoning: str):
+        await self.sendMail(
+            subject=f'Claim Update: {claim_id}',
+            template_name='reject_email',
+            claim_id=claim_id,
+            applicant_name=applicant_name,
+            policy_number=policy_number,
+            reasoning=reasoning
+        )
+
+    async def send_missing_info_email(self, claim_id: str, missing_documents: List[str], provider_name: str = "Healthcare Provider"):
+        """
+        Sends an email requesting missing documents from the healthcare provider.
+        This handles the scenario when the AI detects missing data.
+        """
+        await self.sendMail(
+            subject=f'Action Required: Missing Documents for Claim {claim_id}',
+            template_name='missing_documents',
+            claim_id=claim_id,
+            missing_documents=missing_documents,
+            provider_name=provider_name
+        )
+
