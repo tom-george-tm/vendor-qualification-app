@@ -11,6 +11,7 @@ from app.config import settings
 from app.email import Email
 from app.document_analysis import build_aggregator_prompt
 from app.constant.file_data import project_data  # <-- pre-analyzed document data keyed by filename
+from app.database import Claims
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +182,7 @@ async def upload_files(
                 reasoning = reasoning.get("summary_text", "See full report for details.")
                 
             if decision == "APPROVE":
+                print("APPROVED========")
                 email_sender = Email(name=applicant_name, url="")
                 await email_sender.send_approval_email(
                     claim_id=claim_id,
@@ -189,12 +191,23 @@ async def upload_files(
                     reasoning=reasoning[:1000]
                 )
             elif decision == "REJECT":
+                print("REJECTED========")
                 email_sender = Email(name=applicant_name, url="")
                 await email_sender.send_rejection_email(
                     claim_id=claim_id,
                     applicant_name=applicant_name,
                     policy_number=policy_number,
                     reasoning=reasoning[:1000]
+                )
+                # update claim status in db
+                await Claims.update_one(
+                    {"claim_id": claim_id},
+                    {
+                        "$set": {
+                            "submission_status": "Rejected",
+                            "is_analyzed": True,
+                        }
+                    },
                 )
     except Exception as email_err:
         logger.warning("Email notification failed: %s", email_err)

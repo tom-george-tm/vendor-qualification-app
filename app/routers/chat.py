@@ -595,7 +595,13 @@ async def send_claim_message(body: ChatRequest):
                 f"📤 **Automated Actions Completed:**\n"
                 f"  - Claim status updated to **Approved**\n"
                 f"  - EOB Generated and sent to Policyholder\n"
-                f"  - Approval notification dispatched to Healthcare Provider"
+                f"  - Approval notification dispatched to Healthcare Provider\n\n"
+                f"📧 **Emails Sent Successfully:**\n"
+                f"  - ✉️ Approval notice → **{applicant_name}** (Policyholder)\n"
+                f"  - ✉️ Settlement intimation → **Healthcare Provider**\n\n"
+                f"---\n\n"
+                f"✅ This claim is now **closed**. Ready for the next one!\n\n"
+                f"👉 Please send a new **Claim ID** (e.g. `CLAIM_ID_123456`) to begin the next analysis."
             )
 
             await ChatSessions.update_one(
@@ -634,6 +640,7 @@ async def send_claim_message(body: ChatRequest):
 
     # ── Branch B: Provider request suggested ────────────────────────────────
     elif provider_request_suggested and body.message.strip().lower() == "yes":
+        print("Provider request suggested")
         claim_id = session.get("claim_id") or (stored_analysis.get("claim_summary", {}).get("claim_id") if stored_analysis else None)
         if claim_id:
             missing_docs = []
@@ -672,6 +679,7 @@ async def send_claim_message(body: ChatRequest):
 
     # ── Branch B.5: CSR types REJECT ────────────────────────────────────────
     elif body.message.strip().upper() == "REJECT" and stored_analysis:
+        print("REJECTED========",body.message)
         claim_id = session.get("claim_id", "")
         overall = stored_analysis.get("overall_assessment", {})
         proj = stored_analysis.get("claim_summary", stored_analysis.get("project_summary", {}))
@@ -776,7 +784,13 @@ async def send_claim_message(body: ChatRequest):
             f"  - Claim status updated to **Rejected**\n"
             f"  - Compliant rejection notice sent to **Policyholder** ({applicant_name})\n"
             f"  - Rejection notification dispatched to **Healthcare Provider**\n\n"
-            f"> The policyholder has been informed of their right to **appeal within 30 days**."
+            f"📧 **Emails Sent Successfully:**\n"
+            f"  - ✉️ Rejection notice → **{applicant_name}** (Policyholder) — includes policy clause & appeal rights\n"
+            f"  - ✉️ Rejection notification → **Healthcare Provider**\n\n"
+            f"> The policyholder has been informed of their right to **appeal within 30 days**.\n\n"
+            f"---\n\n"
+            f"✅ This claim is now **closed**. Ready for the next one!\n\n"
+            f"👉 Please send a new **Claim ID** (e.g. `CLAIM_ID_123456`) to begin the next analysis."
         )
 
         # Clear session state
@@ -794,7 +808,7 @@ async def send_claim_message(body: ChatRequest):
     # ── Branch D: First message (Claim ID) ──────────────────────────────────
     else:
         match = re.fullmatch(r"(CLAIM_ID_\d+)", body.message.strip())
-        if not match:
+        if not match and body.message.strip().lower() != "hello":
             response_msg = (
                 "👋 **Welcome to the Claim Analysis Assistant!**\n\n"
                 "Please send your **Claim ID** (e.g. `CLAIM_ID_123456`) to begin analysis."
@@ -821,7 +835,24 @@ async def send_claim_message(body: ChatRequest):
                 overall = agg.get("overall_assessment", {})
                 is_not_ready = overall.get("submission_status") == "Not Ready"
                 suggestion = overall.get("final_suggestion")
-                suggest_provider = (suggestion == "REJECT" or is_not_ready)
+                detected_issues = overall.get("all_detected_issues", [])
+                coverage_status = overall.get("coverage_status", "")
+
+                # Check for policy exclusion
+                exclusion_keywords = ["exclusion", "not covered", "excluded", "policy clause",
+                                      "cosmetic", "pre-existing", "waiting period", "non-payable"]
+                has_policy_exclusion = any(
+                    any(k in issue.lower() for k in exclusion_keywords)
+                    for issue in detected_issues
+                )
+                is_not_covered = "not covered" in coverage_status.lower() if coverage_status else False
+
+                # Only suggest provider request for missing-docs scenarios,
+                # NOT for policy exclusion/coverage rejection (those go to Branch B.5 REJECT).
+                if has_policy_exclusion or is_not_covered:
+                    suggest_provider = False   # Scenario 3 — CSR will type REJECT
+                else:
+                    suggest_provider = (suggestion == "REJECT" or is_not_ready)
 
                 await ChatSessions.update_one(
                     {"session_id": body.session_id},
