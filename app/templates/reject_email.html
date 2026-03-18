@@ -2,28 +2,82 @@
 <html>
 <head>
     <style>
-        body { font-family: sans-serif; color: #333; line-height: 1.6; }
-        .container { padding: 20px; max-width: 600px; margin: auto; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.7; background-color: #f4f4f4; margin: 0; padding: 0; }
+        .wrapper { background-color: #f4f4f4; padding: 30px 10px; }
+        .container { background-color: #fff; max-width: 640px; margin: auto; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .header { background-color: #c0392b; padding: 28px 32px; }
+        .header h1 { color: #fff; margin: 0; font-size: 20px; font-weight: 600; }
+        .header p { color: #f5c6c6; margin: 6px 0 0; font-size: 13px; }
+        .body { padding: 28px 32px; }
+        .alert-box { background-color: #fdf3f3; border-left: 5px solid #c0392b; border-radius: 4px; padding: 16px 20px; margin: 20px 0; }
+        .alert-box h3 { margin: 0 0 8px; color: #c0392b; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .alert-box p { margin: 0; font-size: 14px; color: #555; }
+        .clause-box { background-color: #fff8f0; border-left: 5px solid #e67e22; border-radius: 4px; padding: 16px 20px; margin: 20px 0; }
+        .clause-box h3 { margin: 0 0 8px; color: #e67e22; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .clause-box p { margin: 0; font-size: 14px; color: #555; }
+        .details-table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; }
+        .details-table td { padding: 10px 14px; border-bottom: 1px solid #eee; }
+        .details-table td:first-child { font-weight: 600; color: #555; width: 40%; }
+        .footer { background-color: #f8f9fa; padding: 18px 32px; border-top: 1px solid #eee; }
+        .footer p { margin: 0; font-size: 13px; color: #888; }
+        .rights-notice { margin-top: 16px; padding: 14px 18px; background-color: #eaf4fb; border-radius: 4px; font-size: 13px; color: #2980b9; border-left: 4px solid #2980b9; }
     </style>
 </head>
 <body>
-<div class="container">
-    <p>Dear {{ applicant_name }},</p>
-    
-    <p>We hope you are doing well.</p>
-    
-    <p>We regret to inform you that after a thorough review of your recent claim submitted under policy number <strong>{{ policy_number }}</strong> (Claim ID: {{ claim_id }}), we are unable to approve the same.</p>
-    
-    <p>The reason for this decision is that {{ reasoning }}</p>
-    
-    <p>We understand that this may be disappointing, and we sincerely appreciate your understanding in this matter. Should you require further clarification on the policy coverage or wish to review alternative options, please feel free to reach out to us.</p>
-    
-    <p>Thank you for your continued trust in us.</p>
-    
-    <p>Warm regards,<br>
-    <strong>Claims Review Team</strong><br>
-    Pure Insurance<br>
-    support@pureinsurance.com</p>
+<div class="wrapper">
+  <div class="container">
+
+    <div class="header">
+      <h1>Claim Decision: Rejected</h1>
+      <p>Pure Insurance — Claims Review Team</p>
+    </div>
+
+    <div class="body">
+      <p>Dear <strong>{{ applicant_name }}</strong>,</p>
+
+      <p>We hope this message finds you well. After a thorough and careful review of your insurance claim, we regret to inform you that your claim has been <strong>rejected</strong> on the grounds of a policy rule violation.</p>
+
+      <table class="details-table">
+        <tr><td>Claim ID</td><td><strong>{{ claim_id }}</strong></td></tr>
+        <tr><td>Policy Number</td><td>{{ policy_number }}</td></tr>
+        {% if diagnosis %}<tr><td>Diagnosis / Procedure</td><td>{{ diagnosis }}</td></tr>{% endif %}
+      </table>
+
+      <div class="alert-box">
+        <h3>⚠ Reason for Rejection</h3>
+        <p>{{ rejection_reason }}</p>
+      </div>
+
+      {% if policy_clause %}
+      <div class="clause-box">
+        <h3>📋 Applicable Policy Clause / Exclusion</h3>
+        <p><strong>{{ policy_clause }}</strong></p>
+        {% if clause_details %}<p style="margin-top:8px;">{{ clause_details }}</p>{% endif %}
+      </div>
+      {% endif %}
+
+      <p>We understand this may be disappointing. Our decision is based strictly on the terms and conditions of your policy, and we are committed to transparency in our claims process.</p>
+
+      <div class="rights-notice">
+        <strong>Your Rights:</strong> You have the right to <strong>appeal this decision within 30 days</strong> of receiving this notice. To initiate an appeal or seek clarification, please contact our Claims Support team with your Claim ID.
+      </div>
+
+      <p style="margin-top: 20px;">If you have any questions or require further assistance, please do not hesitate to reach out to us at <a href="mailto:support@pureinsurance.com">support@pureinsurance.com</a>.</p>
+
+      <p>Thank you for your continued trust in Pure Insurance.</p>
+
+      <p>Warm regards,<br>
+      <strong>Claims Review Team</strong><br>
+      Pure Insurance<br>
+      <a href="mailto:support@pureinsurance.com">support@pureinsurance.com</a></p>
+    </div>
+
+    <div class="footer">
+      <p>This is an automated notification. Please do not reply directly to this email.</p>
+      <p style="margin-top:6px;">© 2025 Pure Insurance. All rights reserved.</p>
+    </div>
+
+  </div>
 </div>
 </body>
 </html>

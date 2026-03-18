@@ -17,10 +17,16 @@ class WorkflowStatus(BaseModel):
     execution_status: str = "SUCCESS"
 
 class ProjectSummary(BaseModel):
-    project_name: str
-    project_type: str
-    capacity_mw: Optional[float]
-    location: str
+    applicant_name: str
+    policy_number: Optional[str] = None
+    applicant_age: Optional[int] = None
+    patient_gender: Optional[str] = None
+    medical_case: str
+    diagnosis: Optional[str] = None
+    procedure: Optional[str] = None
+    hospital_name: str
+    hospital_location: Optional[str] = None
+    claimed_amount: Optional[float] = None
     analysis_timestamp: str
     documents_analyzed: int
 
@@ -43,6 +49,15 @@ class DocumentAnalysisDetail(BaseModel):
     document_status: str
     risk_level: str
     decision_reasoning: str
+    policy_number: Optional[str] = None
+    applicant_name: Optional[str] = None
+    applicant_age: Optional[int] = None
+    patient_gender: Optional[str] = None
+    hospital_name: Optional[str] = None
+    hospital_location: Optional[str] = None
+    diagnosis: Optional[str] = None
+    procedure: Optional[str] = None
+    claimed_amount: Optional[float] = None
     recommendations: List[str]
     checklist_results: List[ChecklistResultItem]
     filename: Optional[str] = None

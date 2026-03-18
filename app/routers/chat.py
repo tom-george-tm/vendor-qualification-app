@@ -134,10 +134,44 @@ EOB: Generated with clear breakdown of approved vs rejected amounts and reasons.
 Settlement: ₹40,000 reimbursement processed to Anita's bank account.
 Status: CLAIM CLOSED with partial rejection. Anita notified of her right to appeal within 30 days.
 
+**SCENARIO 3 — CLAIM REJECTION (Policy Rule Violation)**
+Policyholder    : Vikram Nair
+Policy Number   : HI-2025-INS-007341
+Policy Type     : Standard Health Insurance (Individual)
+Sum Insured     : ₹5,00,000
+Policy Valid    : 01-Jan-2025 to 31-Dec-2025
+Hospital        : Cloudnine Hospital, Bengaluru (Network Hospital)
+Admission Date  : 10-Mar-2025
+Discharge Date  : 12-Mar-2025
+Diagnosis       : Refractive Error (Myopia)
+Treatment       : LASIK Eye Surgery (laser vision correction)
+Claim Type      : Reimbursement
+Claim ID        : CLM-2025-03-01254
+
+Documents Submitted:
+  1. Hospital Bill        — ₹85,000 (procedure fee + pre-op tests + medicines)
+  2. Blood Report         — Routine pre-operative CBC — all within normal range
+  3. Medical Report       — Ophthalmology report confirming refractive error; LASIK recommended for vision correction
+
+Coverage Verification:
+  - Policy Status         : Active
+  - Treatment Covered     : NO — falls under EXCLUSION CLAUSE 6.3 (Elective/Cosmetic Procedures — includes laser vision correction / LASIK)
+  - Waiting Period        : Not applicable
+  - Result                : NOT ELIGIBLE
+
+Decision: REJECTED ENTIRELY
+  - Reason: LASIK eye surgery is classified as an elective / cosmetic procedure and is explicitly excluded under Policy Exclusion Clause 6.3.
+  - Applicable Clause: Exclusion Clause 6.3 — Optical / Vision Correction Procedures
+Policyholder notified of rejection and right to appeal within 30 days.
+Healthcare provider notified via system-generated communication.
+Status: CLAIM CLOSED with full rejection. Rejection is transparent, traceable, and aligned with policy wording.
+
 --- HOW TO USE THESE SCENARIOS ---
 - When explaining the claim workflow to a user, reference the appropriate scenario with its hardcoded values.
 - If the user's claim has full coverage and no exclusions, follow Scenario 1 (Happy Path) as a template.
 - If the user's claim has exclusions, partial coverage, or rejected items, follow Scenario 2 (Negative Path) as a template.
+- If the user's claim involves a procedure not covered under the policy (policy rule violation), follow Scenario 3 (Rejection) as a template.
+- In Scenario 3, always highlight the exact policy clause/exclusion, explain the rejection reason clearly, and inform the policyholder of their right to appeal.
 - Always explain which parts are approved, which are rejected, and why, using the same detailed breakdown format.
 - Provide clear next steps based on which scenario the claim most closely matches.
 - When no analysis data is available, you can use these scenarios as illustrative examples to explain the process.
@@ -428,37 +462,27 @@ async def send_message(body: ChatRequest):
 async def send_claim_message(body: ChatRequest):
     """
     Claim-specific chat powered by a LangGraph workflow.
-
-    Session lifecycle
-    -----------------
-    1. **First message** — must be a Claim ID (``CLAIM_ID_XXXXXX``).
-       The LangGraph pipeline runs automatically:
-         validate → load PDFs → classify → analyse → aggregate → format reply
-       The aggregated result is stored in the session for future turns.
-
-    2. **Subsequent messages** — free-form questions answered by the AI
-       using the stored claim analysis as grounding context.
     """
     session = await _get_session(body.session_id)
     messages_history: list = session.get("messages", [])
     stored_analysis: Optional[dict] = session.get("claim_analysis")
     settlement_pending: bool = session.get("settlement_pending", False)
+    provider_request_suggested: bool = session.get("provider_request_suggested", False)
     settlement_info: dict = session.get("settlement_info", {})
     now = datetime.utcnow()
 
-    # ── Branch A: Settlement pending – handle proceed / custom amount ───────
+    response_msg = ""
+    has_data = False
+
+    # ── Branch A: Settlement pending ────────────────────────────────────────
     if settlement_pending and settlement_info:
-        user_msg = body.message.strip()
-        user_msg_lower = user_msg.lower()
-        print("User message during settlement pending:", user_msg)
+        user_msg = body.message.strip().lower()
         proceed_keywords = {"yes", "proceed", "approve", "accept", "confirm", "ok", "okay"}
-        is_proceed = bool(proceed_keywords & set(user_msg_lower.split()))
-        print("Is user accepting settlement?", is_proceed)
+        is_proceed = bool(proceed_keywords & set(user_msg.split()))
 
         # Try to parse a custom numeric amount
         custom_amount: Optional[float] = None
         if not is_proceed:
-            print("Checking for custom amount in user message", user_msg)
             amt_match = re.search(r"(\d[\d,]*\.?\d*)", user_msg.replace(" ", ""))
             if amt_match:
                 try:
@@ -467,20 +491,18 @@ async def send_claim_message(body: ChatRequest):
                     custom_amount = None
 
         if is_proceed:
-            # ── Process claim at settlement amount & delete blobs ──
             s_claim_id = settlement_info.get("claim_id", "")
             s_amount = settlement_info.get("settlement_amount", 0)
-            s_bill_amount = settlement_info.get("bill_amount", 0)
-            s_deduction_pct = settlement_info.get("deduction_percentage", 0)
+            b_amount = settlement_info.get("bill_amount", 0)
             try:
                 container = _get_container_client()
                 for blob_name in list_blobs_in_prefix(f"{s_claim_id}/"):
                     container.delete_blob(blob_name)
-                logger.info("Deleted all blobs for claim %s after approval.", s_claim_id)
+                logger.info("Deleted blobs for claim %s after approval.", s_claim_id)
             except Exception as _e:
                 logger.warning("Could not delete blobs for claim %s: %s", s_claim_id, _e)
 
-            # Persist resolved claim to DB
+            # Update ResolvedClaims collection
             await ResolvedClaims.update_one(
                 {"claim_id": s_claim_id},
                 {
@@ -489,8 +511,8 @@ async def send_claim_message(body: ChatRequest):
                         "session_id": body.session_id,
                         "resolved_at": now,
                         "resolution_type": "approved",
-                        "bill_amount": s_bill_amount,
-                        "deduction_percentage": s_deduction_pct,
+                        "bill_amount": b_amount,
+                        "deduction_percentage": settlement_info.get("deduction_percentage"),
                         "settlement_amount": s_amount,
                         "final_amount": s_amount,
                         "claim_analysis": stored_analysis or {},
@@ -498,16 +520,84 @@ async def send_claim_message(body: ChatRequest):
                 },
                 upsert=True,
             )
-            logger.info("Saved resolved claim %s to DB.", s_claim_id)
 
-            response_msg = (
-                f"\u2705 **Claim `{s_claim_id}` \u2014 Processed Successfully!**\n\n"
-                f"\U0001F4B0 Settlement amount of **\u20b9{s_amount:,.2f}** has been approved "
-                f"and processed.\n\n"
-                "The claim documents have been archived and removed.\n\n"
-                "Thank you for using the Claim Analysis Assistant! "
-                "You can start a new claim by providing another Claim ID."
+            # Update Claims collection status
+            from app.database import Claims
+            await Claims.update_one(
+                {"claim_id": s_claim_id},
+                {"$set": {"submission_status": "Approved"}}
             )
+
+            # Send Emails
+            applicant_name = "Customer"
+            policy_number = "[Policy Number]"
+            diagnosis = "Medical Condition"
+            if stored_analysis:
+                proj = stored_analysis.get("claim_summary", stored_analysis.get("project_summary", {}))
+                applicant_name = proj.get("applicant_name", "Customer")
+                policy_number = proj.get("policy_number", "[Policy Number]")
+                diagnosis = proj.get("diagnosis", "Medical Condition")
+
+            try:
+                from app.email import Email
+                email_sender = Email(name=applicant_name, url="")
+                # Send to policyholder (uses hospital/total/approved logic internally or just reasoning if we format it)
+                reasoning = (
+                    f"Claim Details:\n"
+                    f"Total Claimed Amount: ₹{b_amount:,.2f}\n"
+                    f"Approved Amount: ₹{s_amount:,.2f}"
+                )
+                if b_amount > s_amount:
+                    reasoning += f"\nNon-payable Amount: ₹{(b_amount - s_amount):,.2f} (non-medical expenses/co-pay as per policy terms)"
+                
+                # We updated the approve_email template to accept hospital_name, diagnosis, total_amount, approved_amount, non_payable_amount
+                # We need to use sendMail directly to pass these new kwargs since send_approval_email doesn't accept them in the signature.
+                # Actually, let's just use sendMail directly for the policyholder
+                hospital_name = proj.get("hospital_name", "the hospital") if stored_analysis else "the hospital"
+                
+                await email_sender.sendMail(
+                    subject=f'Claim Approval Notification – Policy {policy_number}',
+                    template_name='approve_email',
+                    claim_id=s_claim_id,
+                    applicant_name=applicant_name,
+                    policy_number=policy_number,
+                    hospital_name=hospital_name,
+                    diagnosis=diagnosis,
+                    total_amount=b_amount,
+                    approved_amount=s_amount,
+                    non_payable_amount=(b_amount - s_amount)
+                )
+                
+                # Send to provider
+                await email_sender.send_provider_intimation_email(
+                    claim_id=s_claim_id,
+                    applicant_name=applicant_name,
+                    total_amount=b_amount,
+                    approved_amount=s_amount,
+                    provider_name="Healthcare Provider"
+                )
+                logger.info("Sent approval and intimation emails for claim %s", s_claim_id)
+            except Exception as e:
+                logger.error("Error sending approval emails for %s: %s", s_claim_id, e)
+
+            # Format Response Message (EOB Style)
+            non_payable = b_amount - s_amount
+            non_payable_str = f"| Non-payable Amount | **₹{non_payable:,.2f}** |\n" if non_payable > 0 else ""
+            
+            response_msg = (
+                f"✅ **Claim `{s_claim_id}` — Approved & Processed**\n\n"
+                f"🌟 *Straight-through processing case—minimal human effort, maximum efficiency.*\n\n"
+                f"📊 **Coverage Breakdown (EOB):**\n"
+                f"| Item | Amount |\n|------|--------|\n"
+                f"| Total Claimed Amount | ₹{b_amount:,.2f} |\n"
+                f"{non_payable_str}"
+                f"| **Final Payable Amount** | **₹{s_amount:,.2f}** |\n\n"
+                f"📤 **Automated Actions Completed:**\n"
+                f"  - Claim status updated to **Approved**\n"
+                f"  - EOB Generated and sent to Policyholder\n"
+                f"  - Approval notification dispatched to Healthcare Provider"
+            )
+
             await ChatSessions.update_one(
                 {"session_id": body.session_id},
                 {"$set": {"settlement_pending": False, "claim_analysis": None}},
@@ -515,20 +605,7 @@ async def send_claim_message(body: ChatRequest):
             has_data = True
 
         elif custom_amount is not None and custom_amount > 0:
-            # ── Process claim at user-specified amount & delete blobs ──
             s_claim_id = settlement_info.get("claim_id", "")
-            s_bill_amount = settlement_info.get("bill_amount", 0)
-            s_deduction_pct = settlement_info.get("deduction_percentage", 0)
-            original_amt = settlement_info.get("settlement_amount", 0)
-            try:
-                container = _get_container_client()
-                for blob_name in list_blobs_in_prefix(f"{s_claim_id}/"):
-                    container.delete_blob(blob_name)
-                logger.info("Deleted all blobs for claim %s after custom-amount approval.", s_claim_id)
-            except Exception as _e:
-                logger.warning("Could not delete blobs for claim %s: %s", s_claim_id, _e)
-
-            # Persist resolved claim to DB
             await ResolvedClaims.update_one(
                 {"claim_id": s_claim_id},
                 {
@@ -537,26 +614,13 @@ async def send_claim_message(body: ChatRequest):
                         "session_id": body.session_id,
                         "resolved_at": now,
                         "resolution_type": "custom_amount",
-                        "bill_amount": s_bill_amount,
-                        "deduction_percentage": s_deduction_pct,
-                        "settlement_amount": original_amt,
                         "final_amount": custom_amount,
                         "claim_analysis": stored_analysis or {},
                     }
                 },
                 upsert=True,
             )
-            logger.info("Saved resolved claim %s to DB (custom amount).", s_claim_id)
-
-            response_msg = (
-                f"\u2705 **Claim `{s_claim_id}` \u2014 Processed with Custom Amount!**\n\n"
-                f"\U0001F4B0 Your custom claim amount of **\u20b9{custom_amount:,.2f}** has been "
-                f"accepted and processed.\n"
-                f"*(Original settlement amount was \u20b9{original_amt:,.2f})*\n\n"
-                "The claim documents have been archived and removed.\n\n"
-                "Thank you for using the Claim Analysis Assistant! "
-                "You can start a new claim by providing another Claim ID."
-            )
+            response_msg = f"✅ **Claim `{s_claim_id}` — Processed with Custom Amount!**\n\n💰 Custom amount of **₹{custom_amount:,.2f}** accepted."
             await ChatSessions.update_one(
                 {"session_id": body.session_id},
                 {"$set": {"settlement_pending": False, "claim_analysis": None}},
@@ -564,171 +628,265 @@ async def send_claim_message(body: ChatRequest):
             has_data = True
 
         else:
-            # Not a settlement action — treat as Q&A about the claim
-            context_json = json.dumps(stored_analysis or {}, indent=2, default=str)
-            openai_msgs = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an insurance claim analysis assistant. "
-                        "Answer the user's questions using ONLY the claim analysis data "
-                        "provided below. Be precise, professional, and helpful.\n\n"
-                        "IMPORTANT: A settlement offer is currently pending for this claim. "
-                        "If the user seems to be asking about proceeding or the amount, "
-                        "remind them they can reply 'proceed' to accept or provide a "
-                        "different amount.\n\n"
-                        f"CLAIM ANALYSIS DATA:\n{context_json[:8000]}"
-                    ),
-                }
-            ]
-            for msg in messages_history[-20:]:
-                openai_msgs.append({"role": msg["role"], "content": msg["content"]})
-            openai_msgs.append({"role": "user", "content": body.message})
-
-            try:
-                resp = await openai_client.chat.completions.create(
-                    model=settings.AZURE_OPENAI_DEPLOYMENT_MINI,
-                    messages=openai_msgs,
-                    temperature=0.3,
-                    max_tokens=1024,
-                )
-                response_msg = (
-                    resp.choices[0].message.content
-                    or "I'm sorry, I could not generate a response. Please try again."
-                )
-            except Exception as exc:
-                logger.error("OpenAI claim Q&A error for session %s: %s", body.session_id, exc)
-                raise HTTPException(status_code=500, detail="Failed to get a response from AI.")
-
+            # Settlement pending but user asked a question instead
+            response_msg = await _get_ai_qa_response(body.message, messages_history, stored_analysis, is_settlement_pending=True)
             has_data = True
 
-    # ── Branch B: follow-up Q&A using stored claim analysis ─────────────────
-    elif stored_analysis:
-        context_json = json.dumps(stored_analysis, indent=2, default=str)
-        openai_msgs = [
-            {
-                "role": "system",
-                "content": (
-                    "You are an insurance claim analysis assistant. "
-                    "Answer the user's questions using ONLY the claim analysis data "
-                    "provided below. Be precise, professional, and helpful.\n\n"
-                    f"CLAIM ANALYSIS DATA:\n{context_json[:8000]}"
-                ),
-            }
-        ]
-        for msg in messages_history[-20:]:
-            openai_msgs.append({"role": msg["role"], "content": msg["content"]})
-        openai_msgs.append({"role": "user", "content": body.message})
+    # ── Branch B: Provider request suggested ────────────────────────────────
+    elif provider_request_suggested and body.message.strip().lower() == "yes":
+        claim_id = session.get("claim_id") or (stored_analysis.get("claim_summary", {}).get("claim_id") if stored_analysis else None)
+        if claim_id:
+            missing_docs = []
+            if stored_analysis:
+                issues = stored_analysis.get("overall_assessment", {}).get("all_detected_issues", [])
+                missing_docs = [i for i in issues if any(k in i.lower() for k in ["missing", "not found"])]
+            
+            if not missing_docs:
+                missing_docs = ["Required claim documentation (Bill, Medical Report, or Blood Report)"]
+
+            applicant_name = "Customer"
+            if stored_analysis:
+                applicant_name = stored_analysis.get("claim_summary", {}).get("applicant_name", "Customer")
+
+            try:
+                from app.email import Email
+                email_sender = Email(name=applicant_name, url="")
+                await email_sender.send_missing_info_email(claim_id=claim_id, missing_documents=missing_docs)
+                
+                from app.database import Claims
+                await Claims.update_one({"claim_id": claim_id}, {"$set": {"submission_status": "Pending External Info"}})
+                
+                await ChatSessions.update_one({"session_id": body.session_id}, {"$set": {"provider_request_suggested": False}})
+
+                response_msg = (
+                    f"✅ **Action Taken:** I have sent a contextual email to the healthcare provider requesting:\n"
+                    + "\n".join([f"- {d}" for d in missing_docs]) +
+                    f"\n\nThe claim status for `{claim_id}` is now **'Pending External Info'**. I'll notify you when they respond."
+                )
+                has_data = True
+            except Exception as e:
+                logger.error("Provider request error: %s", e)
+                response_msg = "I encountered an error contacting the provider. Please try again."
+        else:
+            response_msg = "I couldn't identify the claim. Please provide a Claim ID."
+
+    # ── Branch B.5: CSR types REJECT ────────────────────────────────────────
+    elif body.message.strip().upper() == "REJECT" and stored_analysis:
+        claim_id = session.get("claim_id", "")
+        overall = stored_analysis.get("overall_assessment", {})
+        proj = stored_analysis.get("claim_summary", stored_analysis.get("project_summary", {}))
+
+        applicant_name = proj.get("applicant_name", "Customer")
+        policy_number = proj.get("policy_number", "[Policy Number]")
+        diagnosis = proj.get("diagnosis", proj.get("medical_case", ""))
+        claimed_amount = proj.get("claimed_amount")
+
+        # Extract the primary rejection reason (policy clause / exclusion)
+        all_issues = overall.get("all_detected_issues", [])
+        coverage_status = overall.get("coverage_status", "")
+        ai_summary_obj = stored_analysis.get("ai_summary", {})
+        ai_summary_text = ai_summary_obj.get("summary_text", "") if isinstance(ai_summary_obj, dict) else str(ai_summary_obj)
+
+        # Try to find an exclusion-related issue as the primary rejection reason
+        exclusion_keywords = ["exclusion", "not covered", "excluded", "policy clause", "cosmetic", "pre-existing", "waiting period", "non-payable"]
+        exclusion_issues = [i for i in all_issues if any(k in i.lower() for k in exclusion_keywords)]
+        rejection_reason = exclusion_issues[0] if exclusion_issues else (all_issues[0] if all_issues else coverage_status or "The procedure/treatment is not covered under the policy terms.")
+
+        # Build a readable policy clause highlight
+        policy_clause = ""
+        clause_details = ""
+        if exclusion_issues:
+            policy_clause = "Policy Exclusion Applies"
+            clause_details = "; ".join(exclusion_issues[:3])
+        elif all_issues:
+            policy_clause = "Policy Rule Violation"
+            clause_details = "; ".join(all_issues[:3])
 
         try:
-            resp = await openai_client.chat.completions.create(
-                model=settings.AZURE_OPENAI_DEPLOYMENT_MINI,
-                messages=openai_msgs,
-                temperature=0.3,
-                max_tokens=1024,
+            # 1. Update ResolvedClaims
+            await ResolvedClaims.update_one(
+                {"claim_id": claim_id},
+                {
+                    "$set": {
+                        "claim_id": claim_id,
+                        "session_id": body.session_id,
+                        "resolved_at": now,
+                        "resolution_type": "rejected",
+                        "rejection_reason": rejection_reason,
+                        "policy_clause": policy_clause,
+                        "clause_details": clause_details,
+                        "claim_analysis": stored_analysis,
+                    }
+                },
+                upsert=True,
             )
-            response_msg = (
-                resp.choices[0].message.content
-                or "I'm sorry, I could not generate a response. Please try again."
-            )
-        except Exception as exc:
-            logger.error("OpenAI claim Q&A error for session %s: %s", body.session_id, exc)
-            raise HTTPException(status_code=500, detail="Failed to get a response from AI.")
 
+            # 2. Update Claims status to Rejected
+            from app.database import Claims
+            await Claims.update_one(
+                {"claim_id": claim_id},
+                {"$set": {"submission_status": "Rejected"}}
+            )
+            logger.info("Claim %s status updated to Rejected by CSR.", claim_id)
+
+            # 3. Send rejection emails
+            from app.email import Email
+            email_sender = Email(name=applicant_name, url="")
+
+            await email_sender.send_rejection_email(
+                claim_id=claim_id,
+                applicant_name=applicant_name,
+                policy_number=policy_number,
+                reasoning=rejection_reason,
+                rejection_reason=rejection_reason,
+                policy_clause=policy_clause,
+                clause_details=clause_details,
+                diagnosis=diagnosis,
+            )
+
+            await email_sender.send_provider_rejection_email(
+                claim_id=claim_id,
+                applicant_name=applicant_name,
+                rejection_reason=rejection_reason,
+                policy_clause=policy_clause,
+                clause_details=clause_details,
+                diagnosis=diagnosis,
+                claimed_amount=claimed_amount,
+                provider_name="Healthcare Provider",
+            )
+            logger.info("Sent rejection emails (policyholder + provider) for claim %s", claim_id)
+        except Exception as e:
+            logger.error("Error processing rejection for claim %s: %s", claim_id, e)
+
+        # 4. Build rich response
+        issues_md = "\n".join([f"  • {i}" for i in all_issues[:5]]) if all_issues else "  • " + rejection_reason
+        clause_md = f"\n\n📋 **Policy Clause / Exclusion Applied:**\n  `{policy_clause}`" if policy_clause else ""
+        if clause_details:
+            clause_md += f"\n  {clause_details}"
+
+        response_msg = (
+            f"🚫 **Claim `{claim_id}` — Rejected**\n\n"
+            f"*Rejection is transparent, traceable, and aligned with policy wording—reducing disputes.*\n\n"
+            f"---\n\n"
+            f"**🔍 AI Insight:** Procedure not covered OR policy exclusion applies\n\n"
+            f"**⚠️ Reason for Rejection:**\n{issues_md}"
+            f"{clause_md}\n\n"
+            f"---\n\n"
+            f"📤 **Automated Actions Completed:**\n"
+            f"  - Claim status updated to **Rejected**\n"
+            f"  - Compliant rejection notice sent to **Policyholder** ({applicant_name})\n"
+            f"  - Rejection notification dispatched to **Healthcare Provider**\n\n"
+            f"> The policyholder has been informed of their right to **appeal within 30 days**."
+        )
+
+        # Clear session state
+        await ChatSessions.update_one(
+            {"session_id": body.session_id},
+            {"$set": {"settlement_pending": False, "claim_analysis": None, "provider_request_suggested": False}},
+        )
         has_data = True
 
-    # ── Branch C: first message — expect a Claim ID ──────────────────────────
+    # ── Branch C: Normal follow-up Q&A ──────────────────────────────────────
+    elif stored_analysis:
+        response_msg = await _get_ai_qa_response(body.message, messages_history, stored_analysis)
+        has_data = True
+
+    # ── Branch D: First message (Claim ID) ──────────────────────────────────
     else:
         match = re.fullmatch(r"(CLAIM_ID_\d+)", body.message.strip())
-
         if not match:
             response_msg = (
                 "👋 **Welcome to the Claim Analysis Assistant!**\n\n"
-                "To begin, please send your **Claim ID** in the format "
-                "`CLAIM_ID_XXXXXX` (e.g. `CLAIM_ID_192113`).\n\n"
-                f"Required documents for analysis: {', '.join(REQUIRED_DOC_TYPES)}."
+                "Please send your **Claim ID** (e.g. `CLAIM_ID_123456`) to begin analysis."
             )
-            has_data = False
-
         else:
             claim_id = match.group(1)
-            logger.info("Starting LangGraph claim workflow for %s (session %s)", claim_id, body.session_id)
-
             initial_state = {
-                "session_id": body.session_id,
-                "claim_id": claim_id,
-                "claim_folder": "",
-                "raw_files": [],
-                "classified_files": [],
-                "missing_docs": [],
-                "document_analyses": [],
-                "aggregated_result": {},
-                "bill_amount": None,
-                "settlement_amount": None,
-                "deduction_percentage": 0,
-                "is_ready": False,
-                "response_message": "",
-                "error": None,
+                "session_id": body.session_id, "claim_id": claim_id, "claim_folder": "",
+                "raw_files": [], "classified_files": [], "missing_docs": [],
+                "document_analyses": [], "aggregated_result": {}, "bill_amount": None,
+                "settlement_amount": None, "deduction_percentage": 0, "is_ready": False,
+                "response_message": "", "error": None,
             }
-
             result = await claim_workflow.ainvoke(initial_state)
             response_msg = result["response_message"]
-            has_data = bool(result.get("aggregated_result"))
+            agg = result.get("aggregated_result", {})
+            has_data = bool(agg)
 
-            # Persist analysis & settlement info to the session
             if has_data:
                 is_ready = result.get("is_ready", False)
                 settle_amt = result.get("settlement_amount")
                 s_pending = bool(is_ready and settle_amt is not None)
-                s_info = {}
-                if s_pending:
-                    s_info = {
-                        "claim_id": claim_id,
-                        "bill_amount": result.get("bill_amount"),
-                        "settlement_amount": settle_amt,
-                        "deduction_percentage": result.get("deduction_percentage", 0),
-                    }
+                
+                overall = agg.get("overall_assessment", {})
+                is_not_ready = overall.get("submission_status") == "Not Ready"
+                suggestion = overall.get("final_suggestion")
+                suggest_provider = (suggestion == "REJECT" or is_not_ready)
 
                 await ChatSessions.update_one(
                     {"session_id": body.session_id},
                     {
                         "$set": {
                             "claim_id": claim_id,
-                            "claim_analysis": result["aggregated_result"],
+                            "claim_analysis": agg,
                             "settlement_pending": s_pending,
-                            "settlement_info": s_info,
+                            "settlement_info": {
+                                "claim_id": claim_id,
+                                "bill_amount": result.get("bill_amount"),
+                                "settlement_amount": settle_amt,
+                                "deduction_percentage": result.get("deduction_percentage", 0),
+                            } if s_pending else {},
+                            "provider_request_suggested": suggest_provider
                         }
                     },
                 )
 
-    # ── Persist both turns to the message history ────────────────────────────
+    # ── Finalise turns ──────────────────────────────────────────────────────
     await ChatSessions.update_one(
         {"session_id": body.session_id},
         {
             "$push": {
                 "messages": {
                     "$each": [
-                        {
-                            "role": "user",
-                            "content": body.message,
-                            "timestamp": now.isoformat(),
-                        },
-                        {
-                            "role": "assistant",
-                            "content": response_msg,
-                            "timestamp": now.isoformat(),
-                        },
+                        {"role": "user", "content": body.message, "timestamp": now.isoformat()},
+                        {"role": "assistant", "content": response_msg, "timestamp": now.isoformat()},
                     ]
                 }
             }
         },
     )
 
-    return ChatResponse(
-        session_id=body.session_id,
-        message=response_msg,
-        has_analysis_data=has_data,
+    return ChatResponse(session_id=body.session_id, message=response_msg, has_analysis_data=has_data)
+
+
+async def _get_ai_qa_response(message: str, history: list, analysis: dict, is_settlement_pending: bool = False) -> str:
+    """Helper to get a grounded Q&A response from OpenAI."""
+    context_json = json.dumps(analysis, indent=2, default=str)
+    system_content = (
+        "You are an insurance claim analysis assistant. "
+        "Answer strictly using the provided claim analysis data.\n\n"
     )
+    if is_settlement_pending:
+        system_content += "A settlement offer is pending. Remind the user they can reply 'proceed' or suggest a different amount.\n\n"
+    
+    system_content += f"CLAIM ANALYSIS DATA:\n{context_json[:8000]}"
+
+    openai_msgs = [{"role": "system", "content": system_content}]
+    for msg in history[-10:]:
+        openai_msgs.append({"role": msg["role"], "content": msg["content"]})
+    openai_msgs.append({"role": "user", "content": message})
+
+    try:
+        resp = await openai_client.chat.completions.create(
+            model=settings.AZURE_OPENAI_DEPLOYMENT_MINI,
+            messages=openai_msgs,
+            temperature=0.3,
+            max_tokens=1024,
+        )
+        return resp.choices[0].message.content or "I couldn't generate a response."
+    except Exception as e:
+        logger.error("Q&A error: %s", e)
+        return "I encountered an error while processing your question."
 
 @router.get("/session/{session_id}/history")
 async def get_session_history(session_id: str):

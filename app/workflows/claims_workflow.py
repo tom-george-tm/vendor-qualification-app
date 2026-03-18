@@ -27,7 +27,7 @@ from typing_extensions import TypedDict
 from app.database import ChatSessions, Claims
 from app.config import settings
 from app.document_analysis import build_aggregator_prompt, build_analysis_prompt
-from app.azure_blob import blob_prefix_exists, list_blobs_in_prefix, download_blob
+from app.azure_blob import blob_prefix_exists, list_blobs_in_prefix, download_blob, get_blob_url
 from app.email import Email
 
 logger = logging.getLogger(__name__)
@@ -509,8 +509,17 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
     for doc in agg.get("document_analysis", []):
         status = doc.get("document_status", doc.get("status", "N/A"))
         risk = doc.get("risk_level", "N/A")
+        filename = doc.get('filename', '')
+        
+        # Build the blob URL if we have a filename
+        doc_link = f"`{filename}`"
+        if filename:
+            blob_path = f"{claim_id}/{filename}"
+            url = get_blob_url(blob_path)
+            doc_link = f"[{filename}]({url})"
+
         doc_lines.append(
-            f"  • **{doc.get('document_type', 'Unknown')}** (`{doc.get('filename', '')}`) "
+            f"  • **{doc.get('document_type', 'Unknown')}** ({doc_link}) "
             f"— Status: {status} | Risk: {risk}"
         )
     docs_section = "\n".join(doc_lines) if doc_lines else "  No documents analysed."
@@ -546,12 +555,65 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
         else:
             settlement_section += f"| **Settlement Amount** | **₹{settle_amt:,.2f}** |\n"
 
-    # Call-to-action
-    cta = (
-        f"\n\n👉 **Suggestion: {suggestion}**\n"
-        f"**Do you want to reject or approve this claim?**\n\n"
-        "You can also ask me specific questions like *'What are the critical issues?'* or *'How can I fix the document gaps?'*"
+    # Call-to-action — route to the correct Scenario
+    detected_issues = overall.get("all_detected_issues", [])
+    exclusion_keywords = ["exclusion", "not covered", "excluded", "policy clause", "cosmetic", "pre-existing", "waiting period", "non-payable"]
+    has_policy_exclusion = any(
+        any(k in issue.lower() for k in exclusion_keywords)
+        for issue in detected_issues
     )
+    coverage = overall.get("coverage_status", "")
+    is_not_covered = "not covered" in coverage.lower() if coverage else False
+
+    if suggestion == "REJECT" or overall.get("submission_status") == "Not Ready":
+        # Determine whether this is a policy exclusion scenario or a missing-docs scenario
+        missing_info_items = [i for i in detected_issues if any(k in i.lower() for k in ["missing", "not found", "absent", "incomplete"])]
+        all_missing = list(dict.fromkeys(list(missing) + missing_info_items))
+
+        if has_policy_exclusion or is_not_covered:
+            # ── Scenario 3: Policy Rule Violation ──────────────────────────
+            # Policy exclusion takes priority — missing docs are irrelevant
+            # if the procedure itself is excluded from coverage.
+            exclusion_issues = [i for i in detected_issues if any(k in i.lower() for k in exclusion_keywords)]
+            clause_highlight = ""
+            if exclusion_issues:
+                clause_highlight = (
+                    f"\n\n🔒 **Policy Clause / Exclusion Identified:**\n"
+                    + "\n".join([f"  • {e}" for e in exclusion_issues[:3]])
+                )
+
+            cta = (
+                f"{clause_highlight}\n\n"
+                f"---\n\n"
+                f"⚠️ **AI Insight:** Procedure not covered OR policy exclusion applies.\n\n"
+                f"🤖 **This claim is not covered under the policy terms. Would you like to proceed with rejection?**\n\n"
+                f"👉 **Type `REJECT` to proceed** — I will:\n"
+                f"  1. Update the claim status to **Rejected**\n"
+                f"  2. Generate a clear, compliant rejection communication\n"
+                f"  3. Send the rejection notice to the **Policyholder** via email\n"
+                f"  4. Dispatch a **Notification to the Healthcare Provider**\n"
+            )
+        else:
+            # ── Scenario 2: Missing documents / info needed ─────────────────
+            missing_list_md = ""
+            if all_missing:
+                missing_list_md = "\n".join([f"  - {item}" for item in all_missing]) + "\n"
+
+            cta = (
+                f"\n\n⚠️ **Required information is missing.**\n"
+                f"{missing_list_md}\n"
+                f"Would you like me to request details from the healthcare provider?\n\n"
+                f"👉 **Type `YES` to proceed** — I will:\n"
+                f"  1. Auto-generate a contextual email listing the missing documents\n"
+                f"  2. Send it to the healthcare provider via the integrated communication system\n"
+                f"  3. Update the claim status to **Pending External Info**\n"
+            )
+    else:
+        # ── Scenario 1: Approve path ────────────────────────────────────────
+        cta = (
+            f"**Do you want to reject or approve this claim?**\n\n"
+            "You can also ask me specific questions like *'What are the critical issues?'* or *'How can I fix the document gaps?'*"
+        )
 
     response = (
         f"✅ **Claim `{claim_id}` — Analysis Complete**\n\n"
@@ -646,12 +708,27 @@ async def node_sync_claims_metadata(state: ClaimWorkflowState) -> dict:
             {"claim_id": claim_id},
             {
                 "$set": {
+                    "policy_number": proj.get("policy_number", "N/A"),
                     "applicant_name": proj.get("applicant_name", "N/A"),
+                    "applicant_age": proj.get("applicant_age"),
+                    "patient_gender": proj.get("patient_gender"),
                     "medical_case": proj.get("medical_case", "N/A"),
+                    "diagnosis": proj.get("diagnosis", "N/A"),
+                    "procedure": proj.get("procedure", "N/A"),
                     "hospital_name": proj.get("hospital_name", "N/A"),
+                    "hospital_location": proj.get("hospital_location", "N/A"),
                     "readiness_score": overall.get("readiness_score", 0),
                     "risk_level": overall.get("risk_level", "N/A"),
                     "submission_status": overall.get("submission_status", "Analyzed"),
+                    "claimed_amount": proj.get("claimed_amount"),
+                    "uploaded_documents": [
+                        {
+                            "filename": d.get("filename"),
+                            "document_type": d.get("document_type"),
+                            "status": d.get("document_status")
+                        }
+                        for d in agg.get("document_analysis", [])
+                    ],
                     "is_analyzed": True,
                 }
             }

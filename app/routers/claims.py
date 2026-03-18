@@ -103,12 +103,20 @@ async def upload_claim_documents(
             "$set": {
                 "claim_id": claim_id,
                 "created_at": datetime.datetime.utcnow(),
-                "applicant_name": "Aravinth Kumar",
-                "medical_case": "Fractured Arm",
-                "hospital_name": "Apollo Hospital",
+                "applicant_name": "Pending Analysis",
+                "policy_number": "Pending Analysis",
+                "applicant_age": None,
+                "patient_gender": None,
+                "medical_case": "Pending Analysis",
+                "diagnosis": "Pending Analysis",
+                "procedure": "Pending Analysis",
+                "hospital_name": "Pending Analysis",
+                "hospital_location": "Pending Analysis",
+                "claimed_amount": None,
                 "readiness_score": 0,
                 "risk_level": "N/A",
                 "submission_status": "Not Analyzed",
+                "uploaded_documents": [],
                 "is_analyzed": False,
             }
         },
@@ -171,12 +179,20 @@ async def get_all_claims():
         # Default details from the claim document
         details = {
             "claim_id": cid,
+            "policy_number": claim_doc.get("policy_number", "Pending Analysis"),
             "applicant_name": claim_doc.get("applicant_name", "Pending Analysis"),
+            "applicant_age": claim_doc.get("applicant_age"),
+            "patient_gender": claim_doc.get("patient_gender"),
             "medical_case": claim_doc.get("medical_case", "Pending Analysis"),
+            "diagnosis": claim_doc.get("diagnosis", "Pending Analysis"),
+            "procedure": claim_doc.get("procedure", "Pending Analysis"),
             "hospital_name": claim_doc.get("hospital_name", "Pending Analysis"),
+            "hospital_location": claim_doc.get("hospital_location", "Pending Analysis"),
             "readiness_score": claim_doc.get("readiness_score", 0),
             "risk_level": claim_doc.get("risk_level", "N/A"),
             "submission_status": claim_doc.get("submission_status", "Not Analyzed"),
+            "claimed_amount": claim_doc.get("claimed_amount"),
+            "uploaded_documents": claim_doc.get("uploaded_documents", []),
             "is_analyzed": claim_doc.get("is_analyzed", False),
             "created_at": claim_doc.get("created_at")
         }
@@ -198,12 +214,27 @@ async def get_all_claims():
             if applicant in ("N/A", "Pending Analysis", "", None):
                 continue
             
+            details["policy_number"] = proj.get("policy_number", details["policy_number"])
             details["applicant_name"] = proj.get("applicant_name", details["applicant_name"])
+            details["applicant_age"] = proj.get("applicant_age", details["applicant_age"])
+            details["patient_gender"] = proj.get("patient_gender", details["patient_gender"])
             details["medical_case"] = proj.get("medical_case", details["medical_case"])
+            details["diagnosis"] = proj.get("diagnosis", details["diagnosis"])
+            details["procedure"] = proj.get("procedure", details["procedure"])
             details["hospital_name"] = proj.get("hospital_name", details["hospital_name"])
+            details["hospital_location"] = proj.get("hospital_location", details["hospital_location"])
             details["readiness_score"] = overall.get("readiness_score", details["readiness_score"])
             details["risk_level"] = overall.get("risk_level", details["risk_level"])
             details["submission_status"] = overall.get("submission_status", "Analyzed")
+            details["claimed_amount"] = proj.get("claimed_amount", details["claimed_amount"])
+            details["uploaded_documents"] = [
+                {
+                    "filename": d.get("filename"),
+                    "document_type": d.get("document_type"),
+                    "status": d.get("document_status")
+                }
+                for d in analysis.get("document_analysis", [])
+            ]
             details["is_analyzed"] = True
 
         # At the end of the loop, before appending

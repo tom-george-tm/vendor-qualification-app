@@ -89,14 +89,42 @@ class Email:
             reasoning=reasoning
         )
 
-    async def send_rejection_email(self, claim_id: str, applicant_name: str, policy_number: str, reasoning: str):
+    async def send_rejection_email(
+        self,
+        claim_id: str,
+        applicant_name: str,
+        policy_number: str,
+        reasoning: str,
+        rejection_reason: str = "",
+        policy_clause: str = "",
+        clause_details: str = "",
+        diagnosis: str = "",
+    ):
         await self.sendMail(
-            subject=f'Claim Update: {claim_id}',
+            subject=f'Claim Decision Notice – Claim {claim_id}',
             template_name='reject_email',
             claim_id=claim_id,
             applicant_name=applicant_name,
             policy_number=policy_number,
-            reasoning=reasoning
+            reasoning=reasoning,
+            rejection_reason=rejection_reason or reasoning,
+            policy_clause=policy_clause,
+            clause_details=clause_details,
+            diagnosis=diagnosis,
+        )
+
+    async def send_provider_intimation_email(self, claim_id: str, applicant_name: str, total_amount: float, approved_amount: float, provider_name: str = "Healthcare Provider"):
+        """
+        Sends an email notifying the healthcare provider that the claim has been approved via straight-through processing.
+        """
+        await self.sendMail(
+            subject=f'Claim Approval Notification – Claim {claim_id}',
+            template_name='provider_intimation',
+            claim_id=claim_id,
+            applicant_name=applicant_name,
+            total_amount=total_amount,
+            approved_amount=approved_amount,
+            provider_name=provider_name
         )
 
     async def send_missing_info_email(self, claim_id: str, missing_documents: List[str], provider_name: str = "Healthcare Provider"):
@@ -110,5 +138,32 @@ class Email:
             claim_id=claim_id,
             missing_documents=missing_documents,
             provider_name=provider_name
+        )
+
+    async def send_provider_rejection_email(
+        self,
+        claim_id: str,
+        applicant_name: str,
+        rejection_reason: str,
+        policy_clause: str = "",
+        clause_details: str = "",
+        diagnosis: str = "",
+        claimed_amount: Optional[float] = None,
+        provider_name: str = "Healthcare Provider",
+    ):
+        """
+        Sends a rejection notification to the healthcare provider.
+        """
+        await self.sendMail(
+            subject=f'Claim Rejection Notification – Claim {claim_id}',
+            template_name='provider_rejection',
+            claim_id=claim_id,
+            applicant_name=applicant_name,
+            rejection_reason=rejection_reason,
+            policy_clause=policy_clause,
+            clause_details=clause_details,
+            diagnosis=diagnosis,
+            claimed_amount=claimed_amount,
+            provider_name=provider_name,
         )
 
