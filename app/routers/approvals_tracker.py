@@ -4,12 +4,19 @@ import logging
 from openai import AsyncAzureOpenAI
 
 from app.constant.approvals_tracker import approvals_tracker_data
-from app.constant.dashboard import dashboard_data
 from app.config import settings
+import json
+import re
+import os
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_here = os.path.dirname(__file__)
+
+with open(os.path.join(_here, "../constant/dashboard.json"), "r") as f:
+    DASHBOARD_CONTEXT = json.load(f)# built once at startup
 
 openai_client = AsyncAzureOpenAI(
     api_key=settings.AZURE_OPENAI_API_KEY,
@@ -24,7 +31,7 @@ async def get_cards():
 @router.get("/ai-summary")
 async def get_ai_summary():
     system_prompt = (
-        "You are an expert project risk analyst.\n"
+        "You are an expert project risk analyst. \n"
         "Analyze the provided dashboard data, which includes a portfolio of energy and infrastructure projects in the UAE.\n"
         "Return a comprehensive summary of the entire dashboard structured in these exact 4 sections in markdown:\n\n"
         "## Operational Summary\n"
@@ -37,7 +44,7 @@ async def get_ai_summary():
         "(paragraph forecast of expected progress and upcoming critical deadlines)"
     )
     
-    user_content = json.dumps(dashboard_data)
+    user_content = json.dumps(DASHBOARD_CONTEXT)
 
     try:
         response = await openai_client.chat.completions.create(

@@ -1,5 +1,10 @@
 from fastapi import APIRouter
-from app.constant.dashboard import dashboard_data
+import json
+import os
+
+_here = os.path.dirname(__file__)
+with open(os.path.join(_here, "../constant/dashboard.json"), "r") as f:
+    dashboard_data = json.load(f)
 
 router = APIRouter()
 
