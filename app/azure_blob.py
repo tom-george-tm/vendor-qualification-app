@@ -9,7 +9,8 @@ import os
 import logging
 from typing import List
 
-from azure.storage.blob import BlobServiceClient, ContainerClient
+from azure.storage.blob import BlobServiceClient, ContainerClient, generate_blob_sas, BlobSasPermissions
+from datetime import datetime, timedelta
 
 from app.config import settings
 
@@ -102,18 +103,29 @@ def upload_blob(blob_name: str, data: bytes, overwrite: bool = True) -> None:
 def download_blob(blob_name: str) -> bytes:
     """
     Download and return the raw bytes of the blob named *blob_name*.
-
-    Args:
-        blob_name: Full blob path, e.g. ``"CLAIM_ID_123456/bill.pdf"``.
-
-    Returns:
-        Raw bytes content of the blob.
-
-    Raises:
-        azure.core.exceptions.ResourceNotFoundError: if the blob does not exist.
     """
     client = _get_container_client()
     blob_client = client.get_blob_client(blob_name)
     data: bytes = blob_client.download_blob().readall()
     logger.info("Downloaded blob: %s (%d bytes)", blob_name, len(data))
     return data
+
+
+def get_blob_url(blob_name: str) -> str:
+    """
+    Return a URL to access the blob. 
+    If AZURE_STORAGE_CONTAINER_URL is provided in settings, we use that.
+    Otherwise, we return the direct blob client URL (which might require auth/SAS).
+    """
+    client = _get_container_client()
+    blob_client = client.get_blob_client(blob_name)
+    
+    # If we have a custom base URL (e.g. for a CDN or specific endpoint)
+    if settings.AZURE_STORAGE_CONTAINER_URL:
+        # Ensure it ends with /
+        base = settings.AZURE_STORAGE_CONTAINER_URL
+        if not base.endswith("/"):
+            base += "/"
+        return f"{base}{blob_name}"
+
+    return blob_client.url

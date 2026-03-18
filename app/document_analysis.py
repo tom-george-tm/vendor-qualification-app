@@ -61,11 +61,16 @@ Your job is to:
 
 Return ONLY the following JSON structure, exact keys and data types, no markdown blocks:
 
-{{
+  "policy_number": "<Extract from documents or null>",
   "applicant_name": "<Extract from documents>",
-  "medical_case": "<Extract from documents>",
   "applicant_age": <number or null>,
+  "patient_gender": "Male" | "Female" | "Other" | null,
+  "medical_case": "<Extract from documents>",
+  "diagnosis": "<Extract detailed diagnosis if available>",
+  "procedure": "<Extract detailed medical procedure if available>",
   "hospital_name": "<Extract from documents>",
+  "hospital_location": "<Extract city/location or null>",
+  "claimed_amount": <number or null if Bill>,
   "analysis_timestamp": "<current_iso_timestamp>",
   "document_type": "{doc_type}",
   "document_status": "Reviewed",
@@ -119,10 +124,16 @@ Return ONLY the following JSON structure, exact keys and data types, no markdown
 
 {{
   "claim_summary": {{
+    "policy_number": "<Extract from documents>",
     "applicant_name": "<Extract from documents>",
-    "medical_case": "<Extract from documents>",
     "applicant_age": <number or null>,
+    "patient_gender": "Male" | "Female" | "Other" | null,
+    "medical_case": "<Extract from documents>",
+    "diagnosis": "<Extract detailed diagnosis>",
+    "procedure": "<Extract detailed medical procedure>",
     "hospital_name": "<Extract from documents>",
+    "hospital_location": "<Extract city/location>",
+    "claimed_amount": <total_sum_from_bills or null>,
     "analysis_timestamp": "<current_iso_timestamp>",
     "documents_analyzed": <count>
   }},

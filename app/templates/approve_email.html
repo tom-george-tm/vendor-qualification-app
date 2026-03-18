@@ -4,28 +4,45 @@
     <style>
         body { font-family: sans-serif; color: #333; line-height: 1.6; }
         .container { padding: 20px; max-width: 600px; margin: auto; }
+        .details-box { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 5px solid #28a745; }
     </style>
 </head>
 <body>
 <div class="container">
     <p>Dear {{ applicant_name }},</p>
     
-    <p>We hope you are doing well.</p>
+    <p>We hope you are recovering well.</p>
     
-    <p>We are pleased to inform you that after a thorough review of your recent claim submitted under policy number <strong>{{ policy_number }}</strong> (Claim ID: {{ claim_id }}), the claim has been approved.</p>
+    <p>We are pleased to inform you that your health insurance claim (Claim ID: <strong>{{ claim_id }}</strong>){% if hospital_name %} for hospitalization at {{ hospital_name }}{% endif %} has been successfully processed and approved.</p>
     
-    {% if reasoning %}
-    <p>{{ reasoning }}</p>
+    {% if diagnosis %}
+    <p>The claim pertains to the treatment of {{ diagnosis }}, which is covered under your policy.</p>
     {% endif %}
     
-    <p>We understand the importance of a smooth claims process and sincerely appreciate your cooperation. Should you require further clarification on the approved amount or the settlement timeline, please feel free to reach out to us.</p>
+    <div class="details-box">
+        <h3 style="margin-top: 0; color: #28a745;">Claim Details:</h3>
+        {% if total_amount is defined and total_amount != None and approved_amount is defined and approved_amount != None %}
+        <ul style="list-style-type: none; padding-left: 0;">
+            <li><strong>Total Claimed Amount:</strong> ₹{{ "{:,.2f}".format(total_amount|float) }}</li>
+            <li><strong>Approved Amount:</strong> ₹{{ "{:,.2f}".format(approved_amount|float) }}</li>
+            {% if non_payable_amount is defined and non_payable_amount != None and non_payable_amount|float > 0 %}
+            <li><strong>Non-payable Amount:</strong> ₹{{ "{:,.2f}".format(non_payable_amount|float) }} (non-medical expenses/co-pay as per policy terms)</li>
+            {% endif %}
+        </ul>
+        {% elif reasoning %}
+        <p>{{ reasoning }}</p>
+        {% else %}
+        <p>Your claim has been approved according to the policy terms and conditions.</p>
+        {% endif %}
+    </div>
     
-    <p>Thank you for your continued trust in us.</p>
+    <p>The approved amount has been processed and will be settled as per the payment mode selected.</p>
+    
+    <p>We thank you for choosing us for your healthcare needs. Wishing you a speedy recovery.</p>
     
     <p>Warm regards,<br>
-    <strong>Claims Review Team</strong><br>
-    Pure Insurance<br>
-    support@pureinsurance.com</p>
+    <strong>Claims Team</strong><br>
+    Pure Insurance</p>
 </div>
 </body>
 </html>

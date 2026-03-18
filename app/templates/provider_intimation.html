@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: sans-serif; color: #333; line-height: 1.6; }
+        .container { padding: 20px; max-width: 600px; margin: auto; }
+        .details-box { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 5px solid #17a2b8; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <p>Dear {{ provider_name }},</p>
+    
+    <p>This is to formally notify you that the health insurance claim for your patient <strong>{{ applicant_name }}</strong> (Claim ID: <strong>{{ claim_id }}</strong>) has been processed and approved.</p>
+    
+    <div class="details-box">
+        <h3 style="margin-top: 0; color: #17a2b8;">Approval Details:</h3>
+        <ul style="list-style-type: none; padding-left: 0;">
+            <li><strong>Patient Name:</strong> {{ applicant_name }}</li>
+            <li><strong>Total Billed Amount:</strong> ₹{{ "{:,.2f}".format(total_amount) }}</li>
+            <li><strong>Approved Amount:</strong> ₹{{ "{:,.2f}".format(approved_amount) }}</li>
+        </ul>
+    </div>
+    
+    <p>The approved settlement amount will be credited to your registered hospital bank account according to the standard payment cycle.</p>
+    
+    <p>Thank you for offering quality healthcare services to our policyholders.</p>
+    
+    <p>Warm regards,<br>
+    <strong>Provider Relations Team</strong><br>
+    Pure Insurance</p>
+</div>
+</body>
+</html>
