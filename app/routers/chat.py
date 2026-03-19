@@ -389,7 +389,8 @@ async def send_claim_message(body: ChatRequest):
     )
 
     # ── Branch A: Settlement pending ────────────────────────────────────────
-    if settlement_pending and settlement_info:
+    # Exclude "REJECT" so it falls through to Branch B.5 even when settlement is pending
+    if settlement_pending and settlement_info and body.message.strip().upper() != "REJECT":
         user_msg = body.message.strip().lower()
         proceed_keywords = {"yes", "proceed", "approve", "accept", "confirm", "ok", "okay"}
         is_proceed = bool(proceed_keywords & set(user_msg.split()))
@@ -435,12 +436,10 @@ async def send_claim_message(body: ChatRequest):
                 upsert=True,
             )
 
-            # Update Claims collection status
+            # Delete from active Claims — full record is archived in ResolvedClaims above
             from app.database import Claims
-            await Claims.update_one(
-                {"claim_id": s_claim_id},
-                {"$set": {"submission_status": "Approved"}}
-            )
+            await Claims.delete_one({"claim_id": s_claim_id})
+            logger.info("Deleted claim %s from Claims collection after approval.", s_claim_id)
 
             # Send Emails
             applicant_name = "Customer"
@@ -593,6 +592,7 @@ async def send_claim_message(body: ChatRequest):
             response_msg = "I couldn't identify the claim. Please provide a Claim ID."
 
     # ── Branch B.5: CSR types REJECT ────────────────────────────────────────
+    # Also fires when settlement_pending=True but CSR overrides with a manual REJECT
     elif body.message.strip().upper() == "REJECT" and stored_analysis:
         print("REJECTED========",body.message)
         claim_id = session.get("claim_id", "")
@@ -626,6 +626,15 @@ async def send_claim_message(body: ChatRequest):
             clause_details = "; ".join(all_issues[:3])
 
         try:
+            # 0. Delete blobs for rejected claim
+            try:
+                container = _get_container_client()
+                for blob_name in list_blobs_in_prefix(f"{claim_id}/"):
+                    container.delete_blob(blob_name)
+                logger.info("Deleted blobs for claim %s after rejection.", claim_id)
+            except Exception as _blob_err:
+                logger.warning("Could not delete blobs for claim %s: %s", claim_id, _blob_err)
+
             # 1. Update ResolvedClaims
             await ResolvedClaims.update_one(
                 {"claim_id": claim_id},
@@ -644,13 +653,10 @@ async def send_claim_message(body: ChatRequest):
                 upsert=True,
             )
 
-            # 2. Update Claims status to Rejected
+            # 2. Delete from active Claims — full record is archived in ResolvedClaims above
             from app.database import Claims
-            await Claims.update_one(
-                {"claim_id": claim_id},
-                {"$set": {"submission_status": "Rejected"}}
-            )
-            logger.info("Claim %s status updated to Rejected by CSR.", claim_id)
+            await Claims.delete_one({"claim_id": claim_id})
+            logger.info("Deleted claim %s from Claims collection after rejection.", claim_id)
 
             # 3. Send rejection emails
             from app.email import Email

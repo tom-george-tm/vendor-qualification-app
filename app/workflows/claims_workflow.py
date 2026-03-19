@@ -623,8 +623,6 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
 
         if has_policy_exclusion or is_not_covered:
             # ── Scenario 3: Policy Rule Violation ──────────────────────────
-            # Policy exclusion takes priority — missing docs are irrelevant
-            # if the procedure itself is excluded from coverage.
             exclusion_issues = [i for i in detected_issues if any(k in i.lower() for k in exclusion_keywords)]
             clause_highlight = ""
             if exclusion_issues:
@@ -633,11 +631,16 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
                     + "\n".join([f"  • {e}" for e in exclusion_issues[:3]])
                 )
 
+            ai_recommendation = (
+                f"\n\n---\n\n"
+                f"## 🤖 AI Recommendation: **REJECT**\n\n"
+                f"> The procedure or treatment is excluded under the policy terms. "
+                f"The claim does not qualify for reimbursement based on the current policy coverage.\n"
+            )
+
             cta = (
-                f"{clause_highlight}\n\n"
-                f"---\n\n"
-                f"⚠️ **AI Insight:** Procedure not covered OR policy exclusion applies.\n\n"
-                f"🤖 **This claim is not covered under the policy terms. Would you like to proceed with rejection?**\n\n"
+                f"{clause_highlight}"
+                f"{ai_recommendation}\n"
                 f"👉 **Type `REJECT` to proceed** — I will:\n"
                 f"  1. Update the claim status to **Rejected**\n"
                 f"  2. Generate a clear, compliant rejection communication\n"
@@ -650,10 +653,17 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
             if all_missing:
                 missing_list_md = "\n".join([f"  - {item}" for item in all_missing]) + "\n"
 
+            ai_recommendation = (
+                f"\n\n---\n\n"
+                f"## 🤖 AI Recommendation: **REQUEST MORE INFO**\n\n"
+                f"> One or more required documents are missing or incomplete. "
+                f"The claim cannot be processed until the healthcare provider submits the outstanding information.\n"
+            )
+
             cta = (
-                f"\n\n⚠️ **Required information is missing.**\n"
+                f"{ai_recommendation}\n"
+                f"⚠️ **Required information is missing.**\n"
                 f"{missing_list_md}\n"
-                f"Would you like me to request details from the healthcare provider?\n\n"
                 f"👉 **Type `YES` to proceed** — I will:\n"
                 f"  1. Auto-generate a contextual email listing the missing documents\n"
                 f"  2. Send it to the healthcare provider via the integrated communication system\n"
@@ -661,9 +671,27 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
             )
     else:
         # ── Scenario 1: Approve path ────────────────────────────────────────
+        score = overall.get("readiness_score", 0)
+        moderate = overall.get("moderate_issues", 0)
+        if moderate > 0:
+            confidence_note = f"with {moderate} minor/moderate item(s) noted — review the details above before confirming"
+        else:
+            confidence_note = "all documents are valid and all checklist criteria are met"
+
+        ai_recommendation = (
+            f"\n\n---\n\n"
+            f"## 🤖 AI Recommendation: **APPROVE**\n\n"
+            f"> Readiness score **{score}/100** — {confidence_note}.\n"
+        )
+
         cta = (
-            f"**Do you want to reject or approve this claim?**\n\n"
-            "You can also ask me specific questions like *'What are the critical issues?'* or *'How can I fix the document gaps?'*"
+            f"{ai_recommendation}\n"
+            f"👉 **Type `YES` or `PROCEED` to approve** — I will:\n"
+            f"  1. Process the settlement and generate the EOB\n"
+            f"  2. Send the approval notice to the **Policyholder**\n"
+            f"  3. Dispatch a settlement intimation to the **Healthcare Provider**\n\n"
+            f"Or type `REJECT` to override and reject this claim instead.\n\n"
+            f"You can also ask me questions like *'What are the moderate issues?'* or *'Why is the score not 100?'*"
         )
 
     response = (
