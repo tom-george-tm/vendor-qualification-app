@@ -17,6 +17,8 @@ import base64
 import json
 import logging
 import re
+import uuid
+from datetime import datetime
 from typing import List, Optional
 
 import fitz  # PyMuPDF
@@ -192,7 +194,7 @@ async def _analyze_single_doc(file_info: ClassifiedFile) -> dict:
                 {"role": "system", "content": analysis_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.1,
+            temperature=0.0,
             max_tokens=4096,
             response_format={"type": "json_object"},
         )
@@ -347,7 +349,7 @@ async def node_aggregate(state: ClaimWorkflowState) -> dict:
                     "content": f"Aggregate the following document analyses:\n\n{input_data}",
                 },
             ],
-            temperature=0.1,
+            temperature=0.0,
             max_tokens=8192,
             response_format={"type": "json_object"},
         )
@@ -360,6 +362,55 @@ async def node_aggregate(state: ClaimWorkflowState) -> dict:
     aggregated["document_analysis"] = state["document_analyses"]
     aggregated["claim_id"] = state["claim_id"]
     aggregated["missing_docs"] = state["missing_docs"]
+
+    # ── Deterministic override: enforce decision rules in code ───────────────
+    # The LLM can be inconsistent; these rules are the source of truth.
+    overall = aggregated.get("overall_assessment", {})
+    missing_docs = state["missing_docs"]
+    score = overall.get("readiness_score", 0)
+    critical = overall.get("critical_issues", 0)
+    moderate = overall.get("moderate_issues", 0)
+    suggestion = overall.get("final_suggestion", "")
+    detected_issues = overall.get("all_detected_issues", [])
+
+    exclusion_keywords = ["exclusion", "not covered", "excluded", "policy clause",
+                          "cosmetic", "pre-existing", "waiting period"]
+    has_policy_exclusion = any(
+        any(k in issue.lower() for k in exclusion_keywords)
+        for issue in detected_issues
+    )
+
+    if has_policy_exclusion:
+        # Always REJECT for policy exclusions regardless of score
+        overall["final_suggestion"] = "REJECT"
+        overall["submission_status"] = "Not Ready"
+        overall["risk_level"] = "Critical"
+    elif missing_docs:
+        # Always MORE_INFO_NEEDED when documents are physically missing
+        overall["final_suggestion"] = "MORE_INFO_NEEDED"
+        overall["submission_status"] = "Not Ready"
+        if overall.get("risk_level") not in ("High", "Critical"):
+            overall["risk_level"] = "High"
+    elif score >= 80 and critical == 0:
+        # Happy path: all docs present, score good, no critical issues → APPROVE
+        overall["final_suggestion"] = "APPROVE"
+        overall["submission_status"] = "Ready"
+        if overall.get("risk_level") not in ("Low", "Moderate"):
+            overall["risk_level"] = "Low" if moderate == 0 else "Moderate"
+    elif critical >= 3 or has_policy_exclusion:
+        overall["final_suggestion"] = "REJECT"
+        overall["submission_status"] = "Not Ready"
+    else:
+        overall["final_suggestion"] = "MORE_INFO_NEEDED"
+        overall["submission_status"] = "Not Ready"
+
+    aggregated["overall_assessment"] = overall
+    logger.info(
+        "Claim %s — deterministic override applied: score=%s critical=%s missing=%s → %s",
+        state["claim_id"], score, critical, missing_docs,
+        overall["final_suggestion"],
+    )
+    # ── End deterministic override ───────────────────────────────────────────
 
     return {"aggregated_result": aggregated}
 
@@ -643,47 +694,29 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
 
 
 async def node_send_email_notification(state: ClaimWorkflowState) -> dict:
-    """Send an email notification when analysis is complete."""
+    """
+    Send an internal analysis-complete notification to the CSR team only.
+
+    APPROVE and REJECT emails with full details are sent AFTER CSR confirmation
+    in chat.py (Branch A and Branch B.5). This node must NOT send those emails
+    to avoid duplicates — it only logs the outcome for MORE_INFO_NEEDED cases.
+    """
     if state.get("error") or not state.get("is_analyzed"):
         return {}
 
     agg = state.get("aggregated_result", {})
     overall = agg.get("overall_assessment", {})
-    proj = agg.get("claim_summary", agg.get("project_summary", {}))
-    
     claim_id = state["claim_id"]
     decision = overall.get("final_suggestion", "MORE_INFO_NEEDED").upper()
-    reasoning = overall.get("coverage_status", "") + "\n" + "\n".join(overall.get("all_detected_issues", []))
-    applicant_name = proj.get("applicant_name", "Customer")
-    
-    # If the AI extraction doesn't provide a policy number, default it to a placeholder
-    policy_number = proj.get("policy_number", "[Policy Number]")
 
-    try:
-        email_sender = Email(name=applicant_name, url="")
-        
-        if "APPROVE" in decision:
-            await email_sender.send_approval_email(
-                claim_id=claim_id,
-                applicant_name=applicant_name,
-                policy_number=policy_number,
-                reasoning=reasoning[:1000]
-            )
-            logger.info("Sent approval email notification for claim %s", claim_id)
-        elif "REJECT" in decision:
-            await email_sender.send_rejection_email(
-                claim_id=claim_id,
-                applicant_name=applicant_name,
-                policy_number=policy_number,
-                reasoning=reasoning[:1000]
-            )
-            logger.info("Sent rejection email notification for claim %s", claim_id)
-        else:
-            logger.info("Decision is %s. No approval/rejection email sent for claim %s", decision, claim_id)
-            
-    except Exception as e:
-        logger.warning("Failed to send email notification for claim %s: %s", claim_id, e)
-
+    # APPROVE → email sent by Branch A (chat.py) after CSR confirms settlement
+    # REJECT  → email sent by Branch B.5 (chat.py) after CSR types REJECT
+    # Both include richer details (amounts, policy clauses, provider intimation)
+    # so we do NOT send here to avoid duplicates.
+    logger.info(
+        "Node 9 email skip: claim %s decision=%s — CSR confirmation branch will handle emails.",
+        claim_id, decision,
+    )
     return {}
 
 
@@ -736,16 +769,31 @@ async def node_sync_claims_metadata(state: ClaimWorkflowState) -> dict:
         logger.info("Synced analysis metadata to Claims collection for %s", claim_id)
 
         # 2. Update ChatSessions (primary for chat grounding)
-        await ChatSessions.update_one(
-            {"claim_id": claim_id},
-            {
-                "$set": {
-                    "claim_analysis": agg,
-                    "is_analyzed": True
-                }
-            },
-            upsert=True # Create a default session if one doesn't exist for background analysis
-        )
+        # First check if a session already exists for this claim_id
+        existing_session = await ChatSessions.find_one({"claim_id": claim_id})
+        if existing_session:
+            # Update the existing session
+            await ChatSessions.update_one(
+                {"claim_id": claim_id},
+                {
+                    "$set": {
+                        "claim_analysis": agg,
+                        "is_analyzed": True
+                    }
+                },
+            )
+        else:
+            # No session exists yet — create one with a proper session_id
+            # to avoid violating the unique index on session_id (null conflicts).
+            bg_session_id = f"bg-{claim_id}-{uuid.uuid4().hex[:8]}"
+            await ChatSessions.insert_one({
+                "session_id": bg_session_id,
+                "claim_id": claim_id,
+                "claim_analysis": agg,
+                "is_analyzed": True,
+                "created_at": datetime.utcnow(),
+                "messages": [],
+            })
         logger.info("Synced analysis metadata to ChatSessions for %s", claim_id)
 
     except Exception as e:
