@@ -24,6 +24,7 @@ from app.azure_blob import (
     upload_blob,
     download_blob,
 )
+from app.email_listener import get_listener_status
 
 logger = logging.getLogger(__name__)
 
@@ -483,3 +484,19 @@ async def get_claim(claim_id: str):
             detail=f"No claim found with ID '{claim_id}'.",
         )
     return _serialize(doc)
+
+
+@router.get("/email-listener/status", summary="Get email listener status")
+async def get_email_listener_status():
+    """
+    Returns the current status of the background email listener:
+    - whether it is running
+    - when it last polled the inbox
+    - how many emails/claims have been processed
+    - any recent errors
+    """
+    status = get_listener_status()
+    status["poll_interval_seconds"] = settings.EMAIL_POLL_INTERVAL_SECONDS
+    status["imap_username"] = settings.IMAP_USERNAME
+    status["listener_enabled_in_config"] = settings.EMAIL_LISTENER_ENABLED
+    return status
