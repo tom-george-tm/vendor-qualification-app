@@ -372,6 +372,15 @@ async def email_listener_loop():
     Infinite loop that polls the IMAP inbox every EMAIL_POLL_INTERVAL_SECONDS.
     Should be started as an asyncio task during FastAPI lifespan startup.
     """
+    # Check if email listener is properly configured
+    if not settings.email_listener_configured:
+        _status["running"] = False
+        _status["last_error"] = "Email listener disabled or IMAP credentials not set"
+        print(
+            "⚠️ Email listener disabled or IMAP credentials not set — skipping."
+        )
+        return
+
     interval = settings.EMAIL_POLL_INTERVAL_SECONDS
     _status["running"] = True
     _status["started_at"] = datetime.datetime.utcnow().isoformat()

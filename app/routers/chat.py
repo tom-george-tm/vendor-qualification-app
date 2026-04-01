@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Form  
 from pydantic import BaseModel
 from typing import Optional
 from openai import AsyncAzureOpenAI
@@ -10,7 +10,7 @@ import logging
 
 import os
 
-from app.database import Results, ChatSessions, ResolvedClaims
+from app.database import Results, ChatSessions, ResolvedClaims, Claims
 from app.config import settings
 from app.workflows.claims_workflow import claim_workflow, REQUIRED_DOC_TYPES
 from app.azure_blob import list_blobs_in_prefix, _get_container_client
@@ -122,6 +122,32 @@ class ChatResponse(BaseModel):
     session_id: str
     message: str
     has_analysis_data: bool
+
+
+class StartClaimSessionRequest(BaseModel):
+    claim_id: str
+
+
+class ClaimSummary(BaseModel):
+    claim_id: str
+    applicant_name: str
+    policy_number: str
+    medical_case: str
+    hospital_name: str
+    hospital_location: str
+    claimed_amount: Optional[float]
+    readiness_score: float
+    risk_level: str
+    submission_status: str
+    is_analyzed: bool
+    final_suggestion: Optional[str] = None
+    coverage_status: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class ClaimsListResponse(BaseModel):
+    total: int
+    claims: list
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +421,7 @@ async def send_claim_message(body: ChatRequest):
         proceed_keywords = {"yes", "proceed", "approve", "accept", "confirm", "ok", "okay"}
         is_proceed = bool(proceed_keywords & set(user_msg.split()))
 
-        # Try to parse a custom numeric amount
+        # Try to parse a custom numeric amount (increase or decrease)
         custom_amount: Optional[float] = None
         if not is_proceed:
             amt_match = re.search(r"(\d[\d,]*\.?\d*)", user_msg.replace(" ", ""))
@@ -525,6 +551,13 @@ async def send_claim_message(body: ChatRequest):
 
         elif custom_amount is not None and custom_amount > 0:
             s_claim_id = settlement_info.get("claim_id", "")
+            b_amount = settlement_info.get("bill_amount", 0)
+            
+            # Calculate if it's increase or decrease
+            original_amount = settlement_info.get("settlement_amount", 0)
+            change_type = "increased" if custom_amount > original_amount else "decreased"
+            change_amount = abs(custom_amount - original_amount)
+            
             await ResolvedClaims.update_one(
                 {"claim_id": s_claim_id},
                 {
@@ -533,13 +566,73 @@ async def send_claim_message(body: ChatRequest):
                         "session_id": body.session_id,
                         "resolved_at": now,
                         "resolution_type": "custom_amount",
+                        "bill_amount": b_amount,
+                        "original_settlement": original_amount,
                         "final_amount": custom_amount,
+                        "change_type": change_type,
+                        "change_amount": change_amount,
                         "claim_analysis": stored_analysis or {},
                     }
                 },
                 upsert=True,
             )
-            response_msg = f"✅ **Claim `{s_claim_id}` — Processed with Custom Amount!**\n\n💰 Custom amount of **₹{custom_amount:,.2f}** accepted."
+            
+            # Delete from active Claims
+            from app.database import Claims
+            await Claims.delete_one({"claim_id": s_claim_id})
+            logger.info("Deleted claim %s from Claims collection after custom amount processing.", s_claim_id)
+            
+            # Send emails for custom amount
+            applicant_name = "Customer"
+            if stored_analysis:
+                proj = stored_analysis.get("claim_summary", stored_analysis.get("project_summary", {}))
+                applicant_name = proj.get("applicant_name", "Customer")
+            
+            try:
+                from app.email import Email
+                email_sender = Email(name=applicant_name, url="")
+                
+                await email_sender.sendMail(
+                    subject=f'Claim Settlement Update – Custom Amount – Policy {proj.get("policy_number", "N/A")}',
+                    template_name='approve_email',  # Reuse template with custom messaging
+                    claim_id=s_claim_id,
+                    applicant_name=applicant_name,
+                    policy_number=proj.get("policy_number", "N/A"),
+                    hospital_name=proj.get("hospital_name", "the hospital"),
+                    diagnosis=proj.get("diagnosis", "Medical Condition"),
+                    total_amount=b_amount,
+                    approved_amount=custom_amount,
+                    non_payable_amount=(b_amount - custom_amount)
+                )
+                
+                await email_sender.send_provider_intimation_email(
+                    claim_id=s_claim_id,
+                    applicant_name=applicant_name,
+                    total_amount=b_amount,
+                    approved_amount=custom_amount,
+                    provider_name="Healthcare Provider"
+                )
+                logger.info("Sent custom amount emails for claim %s", s_claim_id)
+            except Exception as e:
+                logger.error("Error sending custom amount emails for %s: %s", s_claim_id, e)
+            
+            response_msg = (
+                f"✅ **Claim `{s_claim_id}` — Processed with Custom Amount!**\n\n"
+                f"💰 **Settlement Details:**\n"
+                f"| Item | Amount |\n|------|--------|\n"
+                f"| Original Settlement | ₹{original_amount:,.2f} |\n"
+                f"| **Custom Amount** | **₹{custom_amount:,.2f}** |\n"
+                f"| Change ({change_type}) | ₹{change_amount:,.2f} |\n"
+                f"| Total Bill | ₹{b_amount:,.2f} |\n\n"
+                f"📤 **Actions Completed:**\n"
+                f"  - Custom settlement amount **{change_type}** by ₹{change_amount:,.2f}\n"
+                f"  - Claim status updated to **Processed**\n"
+                f"  - Notification emails sent to Policyholder & Provider\n\n"
+                f"---\n\n"
+                f"✅ This claim is now **closed**. Ready for the next one!\n\n"
+                f"👉 Please send a new **Claim ID** to continue processing."
+            )
+            
             await ChatSessions.update_one(
                 {"session_id": body.session_id},
                 {"$set": {"settlement_pending": False, "claim_analysis": None}},
@@ -726,27 +819,231 @@ async def send_claim_message(body: ChatRequest):
         response_msg = await _get_ai_qa_response(body.message, messages_history, stored_analysis)
         has_data = True
 
-    # ── Branch D: First message (Claim ID) ──────────────────────────────────
+    # ── Branch D: First message (Claim ID or Claims Selection) ──────────────────────────────────
     else:
-        match = re.fullmatch(r"(CLAIM_ID_\d+)", body.message.strip())
-        if not match and body.message.strip().lower() != "hello":
-            response_msg = (
-                "👋 **Welcome to the Claim Analysis Assistant!**\n\n"
-                "Please send your **Claim ID** (e.g. `CLAIM_ID_123456`) to begin analysis."
-            )
+        # Check if this is a claim selection session
+        available_claim_ids = session.get("available_claim_ids", [])
+        all_claims_data = session.get("all_claims_data", [])
+        processing_mode = session.get("processing_mode")
+        
+        if processing_mode == "claims_selection" and available_claim_ids:
+            # Handle claims selection from database processing
+            user_msg = body.message.strip().lower()
+            
+            # Check for filtering requests
+            if any(keyword in user_msg for keyword in ["high risk", "high-risk", "high"]):
+                # Filter high-risk claims
+                high_risk_claims = [claim for claim in all_claims_data if claim.get("risk_level") == "High"]
+                if high_risk_claims:
+                    claims_text = "\n\n".join([
+                        f"• **{claim['claim_id']}** - {claim['applicant_name']} - ₹{claim.get('claimed_amount', 0):,} - 🔴 High Risk"
+                        for claim in high_risk_claims
+                    ])
+                    response_msg = f"🔴 **High-Risk Claims Found:**\n\n{claims_text}\n\nWhich high-risk claim would you like to process?"
+                else:
+                    response_msg = "✅ No high-risk claims found. All claims are low or medium risk."
+            
+            elif any(keyword in user_msg for keyword in ["medium risk", "medium-risk", "medium"]):
+                # Filter medium-risk claims
+                medium_risk_claims = [claim for claim in all_claims_data if claim.get("risk_level") == "Medium"]
+                if medium_risk_claims:
+                    claims_text = "\n\n".join([
+                        f"• **{claim['claim_id']}** - {claim['applicant_name']} - ₹{claim.get('claimed_amount', 0):,} - 🟡 Medium Risk"
+                        for claim in medium_risk_claims
+                    ])
+                    response_msg = f"🟡 **Medium-Risk Claims Found:**\n\n{claims_text}\n\nWhich medium-risk claim would you like to process?"
+                else:
+                    response_msg = "✅ No medium-risk claims found."
+            
+            elif any(keyword in user_msg for keyword in ["low risk", "low-risk", "low"]):
+                # Filter low-risk claims
+                low_risk_claims = [claim for claim in all_claims_data if claim.get("risk_level") == "Low"]
+                if low_risk_claims:
+                    claims_text = "\n\n".join([
+                        f"• **{claim['claim_id']}** - {claim['applicant_name']} - ₹{claim.get('claimed_amount', 0):,} - 🟢 Low Risk"
+                        for claim in low_risk_claims
+                    ])
+                    response_msg = f"🟢 **Low-Risk Claims Found:**\n\n{claims_text}\n\nWhich low-risk claim would you like to process?"
+                else:
+                    response_msg = "✅ No low-risk claims found."
+            
+            elif any(keyword in user_msg for keyword in ["analyzed", "ready", "processed"]):
+                # Filter analyzed claims
+                analyzed_claims = [claim for claim in all_claims_data if claim.get("is_analyzed")]
+                if analyzed_claims:
+                    claims_text = "\n\n".join([
+                        f"• **{claim['claim_id']}** - {claim['applicant_name']} - ₹{claim.get('claimed_amount', 0):,} - ✅ Analyzed"
+                        for claim in analyzed_claims
+                    ])
+                    response_msg = f"✅ **Analyzed Claims Ready:**\n\n{claims_text}\n\nWhich analyzed claim would you like to process?"
+                else:
+                    response_msg = "⏳ No analyzed claims found yet. Please wait for analysis to complete."
+            
+            elif any(keyword in user_msg for keyword in ["pending", "not analyzed", "waiting"]):
+                # Filter pending claims
+                pending_claims = [claim for claim in all_claims_data if not claim.get("is_analyzed")]
+                if pending_claims:
+                    claims_text = "\n\n".join([
+                        f"• **{claim['claim_id']}** - {claim['applicant_name']} - ₹{claim.get('claimed_amount', 0):,} - ⏳ Pending Analysis"
+                        for claim in pending_claims
+                    ])
+                    response_msg = f"⏳ **Claims Pending Analysis:**\n\n{claims_text}\n\nWhich claim would you like to analyze first?"
+                else:
+                    response_msg = "✅ All claims have been analyzed."
+            
+            elif any(keyword in user_msg for keyword in ["show all", "list all", "all claims", "claims"]):
+                # Show all claims
+                claims_text = "\n\n".join([
+                    f"• **{claim['claim_id']}** - {claim['applicant_name']} - ₹{claim.get('claimed_amount', 0):,} - {claim.get('risk_level', 'N/A')} Risk"
+                    for claim in all_claims_data
+                ])
+                response_msg = f"📋 **All Available Claims:**\n\n{claims_text}\n\nWhich claim would you like to process?"
+            
+            else:
+                # Check if user specified a claim ID from the available list
+                matching_claim = None
+                for claim in all_claims_data:
+                    if claim["claim_id"].lower() in user_msg:
+                        matching_claim = claim
+                        break
+                
+                if matching_claim:
+                    # Process the specified claim
+                    claim_id = matching_claim["claim_id"]
+                    initial_state = {
+                        "session_id": body.session_id, "claim_id": claim_id, "claim_folder": "",
+                        "raw_files": [], "classified_files": [], "missing_docs": [],
+                        "document_analyses": [], "aggregated_result": {}, "bill_amount": None,
+                        "settlement_amount": None, "deduction_percentage": 0, "is_ready": False,
+                        "response_message": "", "error": None,
+                    }
+                    result = await claim_workflow.ainvoke(initial_state)
+                    response_msg = result["response_message"]
+                    agg = result.get("aggregated_result", {})
+                    has_data = bool(agg)
+                    
+                    # Add context about available claims
+                    available_claims_text = "\n\n**🔄 Available Claims:**\n" + "\n".join([f"• {claim['claim_id']}" for claim in all_claims_data])
+                    response_msg += f"\n\n{available_claims_text}\n\n💡 **Tip:** You can switch claims anytime by mentioning another Claim ID, or ask to filter by risk level!"
+
+                    if has_data:
+                        is_ready = result.get("is_ready", False)
+                        settle_amt = result.get("settlement_amount")
+                        s_pending = bool(is_ready and settle_amt is not None)
+                        
+                        overall = agg.get("overall_assessment", {})
+                        is_not_ready = overall.get("submission_status") == "Not Ready"
+                        suggestion = overall.get("final_suggestion")
+                        detected_issues = overall.get("all_detected_issues", [])
+                        coverage_status = overall.get("coverage_status", "")
+
+                        # Check for policy exclusion
+                        exclusion_keywords = ["exclusion", "not covered", "excluded", "policy clause",
+                                              "cosmetic", "pre-existing", "waiting period", "non-payable"]
+                        has_policy_exclusion = any(
+                            any(k in issue.lower() for k in exclusion_keywords)
+                            for issue in detected_issues
+                        )
+                        is_not_covered = "not covered" in coverage_status.lower() if coverage_status else False
+
+                        # Only suggest provider request for missing-docs scenarios,
+                        # NOT for policy exclusion/coverage rejection (those go to Branch B.5 REJECT).
+                        if has_policy_exclusion or is_not_covered:
+                            suggest_provider = False   # Scenario 3 — CSR will type REJECT
+                        else:
+                            suggest_provider = (suggestion == "REJECT" or is_not_ready)
+
+                        try:
+                            await ChatSessions.update_one(
+                                {"session_id": body.session_id},
+                                {
+                                    "$set": {
+                                        "claim_id": claim_id,
+                                        "current_claim_id": claim_id,
+                                        "claim_analysis": agg,
+                                        "settlement_pending": s_pending,
+                                        "settlement_info": {
+                                            "claim_id": claim_id,
+                                            "bill_amount": result.get("bill_amount"),
+                                            "settlement_amount": settle_amt,
+                                            "deduction_percentage": result.get("deduction_percentage", 0),
+                                        } if s_pending else {},
+                                        "provider_request_suggested": suggest_provider
+                                    }
+                                },
+                            )
+                            logger.info(
+                                "Session %s updated: provider_request_suggested=%s, settlement_pending=%s",
+                                body.session_id, suggest_provider, s_pending,
+                            )
+                        except Exception as _update_err:
+                            logger.error("Failed to update session state for %s: %s", body.session_id, _update_err)
+                
+                elif user_msg in ["hello", "hi", "help", "start", "begin"]:
+                    # Show welcome with all claims
+                    claims_display = []
+                    for i, claim in enumerate(all_claims_data, 1):
+                        status_emoji = "✅" if claim["is_analyzed"] else "⏳"
+                        risk_emoji = {"Low": "🟢", "Medium": "🟡", "High": "🔴", "N/A": "⚪"}.get(claim["risk_level"], "⚪")
+                        
+                        claims_display.append(
+                            f"{i}. **{claim['claim_id']}** {status_emoji} {risk_emoji}\n"
+                            f"   👤 {claim['applicant_name']} | 🏥 {claim['hospital_name']}\n"
+                            f"   💰 ₹{claim.get('claimed_amount', 0):,} | 📊 {claim['risk_level']} Risk\n"
+                            f"   📋 {claim['submission_status']}"
+                        )
+                    
+                    response_msg = (
+                        f"🎯 **Welcome to Claims Processing Center!**\n\n"
+                        f"Found **{len(all_claims_data)} claims** in your database. "
+                        f"Please select a claim by mentioning its **Claim ID** (e.g., `CLAIM_ID_123456`)\n\n"
+                        f"**📋 Available Claims:**\n\n"
+                        + "\n\n".join(claims_display) +
+                        f"\n\n---\n\n"
+                        f"💡 **How to use:**\n"
+                        f"• Type a **Claim ID** to analyze that claim\n"
+                        f"• Ask questions like \"What is the risk level of CLAIM_ID_123456?\"\n"
+                        f"• Say \"Switch to CLAIM_ID_789012\" to change claims\n"
+                        f"• Use **approve**, **reject**, or suggest **custom amounts** for settlements\n"
+                        f"• Ask \"Show me all high-risk claims\" for filtering\n\n"
+                        f"🚀 **Ready to begin!** Which claim would you like to process first?"
+                    )
+                
+                else:
+                    # Default response for claims selection mode
+                    response_msg = (
+                        f"I found {len(all_claims_data)} claims in database.\n\n"
+                        f"**Available Actions:**\n"
+                        f"• Mention a **Claim ID** to process it (e.g., `CLAIM_ID_123456`)\n"
+                        f"• Ask to **filter by risk level**: \"Show high-risk claims\"\n"
+                        f"• Ask for **analyzed claims**: \"Show analyzed claims\"\n"
+                        f"• Ask for **pending claims**: \"Show pending claims\"\n"
+                        f"• Say **show all claims** for complete list\n\n"
+                        f"Which action would you like to take?"
+                    )
+        
         else:
-            claim_id = match.group(1)
-            initial_state = {
-                "session_id": body.session_id, "claim_id": claim_id, "claim_folder": "",
-                "raw_files": [], "classified_files": [], "missing_docs": [],
-                "document_analyses": [], "aggregated_result": {}, "bill_amount": None,
-                "settlement_amount": None, "deduction_percentage": 0, "is_ready": False,
-                "response_message": "", "error": None,
-            }
-            result = await claim_workflow.ainvoke(initial_state)
-            response_msg = result["response_message"]
-            agg = result.get("aggregated_result", {})
-            has_data = bool(agg)
+            # Original claim ID processing logic
+            match = re.fullmatch(r"(CLAIM_ID_\d+)", body.message.strip())
+            if not match and body.message.strip().lower() != "hello":
+                response_msg = (
+                    "👋 **Welcome to the Claim Analysis Assistant!**\n\n"
+                    "Please send your **Claim ID** (e.g. `CLAIM_ID_123456`) to begin analysis."
+                )
+            else:
+                claim_id = match.group(1) if match else None
+                if claim_id:
+                    initial_state = {
+                        "session_id": body.session_id, "claim_id": claim_id, "claim_folder": "",
+                        "raw_files": [], "classified_files": [], "missing_docs": [],
+                        "document_analyses": [], "aggregated_result": {}, "bill_amount": None,
+                        "settlement_amount": None, "deduction_percentage": 0, "is_ready": False,
+                        "response_message": "", "error": None,
+                    }
+                    result = await claim_workflow.ainvoke(initial_state)
+                    response_msg = result["response_message"]
+                    agg = result.get("aggregated_result", {})
+                    has_data = bool(agg)
 
             if has_data:
                 is_ready = result.get("is_ready", False)
@@ -869,6 +1166,75 @@ async def get_session_analysis(session_id: str):
     return {"has_analysis_data": True, "data": analysis}
 
 
+@router.post("/session/{session_id}/switch-claim", response_model=ChatResponse)
+async def switch_claim_in_session(
+    session_id: str,
+    claim_id: str = Form(...)
+):
+    """
+    Switch to a different claim within the same session.
+    This allows natural conversation flow when processing multiple claims.
+    """
+    session = await _get_session(session_id)
+    available_claim_ids = session.get("available_claim_ids", [])
+    processing_mode = session.get("processing_mode")
+    
+    # Validate claim ID is available
+    if processing_mode == "claim_ids" and available_claim_ids:
+        if claim_id not in available_claim_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Claim '{claim_id}' is not in the available claims list"
+            )
+    else:
+        # For regular sessions, verify claim exists in database
+        from app.database import Claims
+        claim_doc = await Claims.find_one({"claim_id": claim_id})
+        if not claim_doc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Claim '{claim_id}' not found"
+            )
+    
+    # Process the new claim
+    initial_state = {
+        "session_id": session_id, "claim_id": claim_id, "claim_folder": "",
+        "raw_files": [], "classified_files": [], "missing_docs": [],
+        "document_analyses": [], "aggregated_result": {}, "bill_amount": None,
+        "settlement_amount": None, "deduction_percentage": 0, "is_ready": False,
+        "response_message": "", "error": None,
+    }
+    result = await claim_workflow.ainvoke(initial_state)
+    response_msg = result["response_message"]
+    agg = result.get("aggregated_result", {})
+    has_data = bool(agg)
+    
+    # Update session with new claim context
+    await ChatSessions.update_one(
+        {"session_id": session_id},
+        {
+            "$set": {
+                "claim_id": claim_id,
+                "current_claim_id": claim_id,
+                "claim_analysis": agg,
+                "settlement_pending": False,
+                "provider_request_suggested": False,
+            }
+        }
+    )
+    
+    # Add context about available claims if in claim_ids mode
+    if processing_mode == "claim_ids" and available_claim_ids:
+        available_claims_text = "\n\n**Available Claims:**\n" + "\n".join([f"• {cid}" for cid in available_claim_ids])
+        response_msg += f"\n\n{available_claims_text}\n\nYou can switch to any claim by mentioning its Claim ID."
+    
+    return ChatResponse(
+        session_id=session_id,
+        message=response_msg,
+        has_analysis_data=has_data
+    )
+
+
 @router.get("/claim/{claim_id}/messages")
 async def get_messages_by_claim_id(claim_id: str):
     """
@@ -889,4 +1255,257 @@ async def get_messages_by_claim_id(claim_id: str):
         "created_at": created_at.isoformat() if isinstance(created_at, datetime) else created_at,
         "total_messages": len(session.get("messages", [])),
         "messages": session.get("messages", []),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Claims-first chat flow
+# ---------------------------------------------------------------------------
+
+@router.get("/claims", response_model=ClaimsListResponse)
+async def list_claims_for_chat():
+    """
+    Returns all active claims from the database, enriched with the latest
+    analysis data (readiness score, risk level, suggestion, etc.).
+
+    Call this to populate the "pick a claim" list before creating a session.
+    Resolved/deleted claims are excluded because they no longer exist in the
+    Claims collection.
+    """
+    cursor = Claims.find({}).sort([("created_at", -1)])
+    db_claims = [doc async for doc in cursor]
+
+    if not db_claims:
+        return ClaimsListResponse(total=0, claims=[])
+
+    enriched: list = []
+    for claim_doc in db_claims:
+        cid = claim_doc["claim_id"]
+
+        detail = {
+            "claim_id": cid,
+            "applicant_name": claim_doc.get("applicant_name", "Pending Analysis"),
+            "policy_number": claim_doc.get("policy_number", "Pending Analysis"),
+            "medical_case": claim_doc.get("medical_case", "Pending Analysis"),
+            "diagnosis": claim_doc.get("diagnosis", "Pending Analysis"),
+            "procedure": claim_doc.get("procedure", "Pending Analysis"),
+            "hospital_name": claim_doc.get("hospital_name", "Pending Analysis"),
+            "hospital_location": claim_doc.get("hospital_location", "Pending Analysis"),
+            "claimed_amount": claim_doc.get("claimed_amount"),
+            "readiness_score": claim_doc.get("readiness_score", 0),
+            "risk_level": claim_doc.get("risk_level", "N/A"),
+            "submission_status": claim_doc.get("submission_status", "Not Analyzed"),
+            "is_analyzed": claim_doc.get("is_analyzed", False),
+            "final_suggestion": None,
+            "coverage_status": None,
+            "created_at": (
+                claim_doc["created_at"].isoformat()
+                if isinstance(claim_doc.get("created_at"), datetime)
+                else claim_doc.get("created_at")
+            ),
+        }
+
+        # Enrich from the most recent analysis session for this claim
+        session_doc = await ChatSessions.find_one(
+            {"claim_id": cid}, sort=[("created_at", -1)]
+        )
+        if session_doc and session_doc.get("claim_analysis"):
+            analysis = session_doc["claim_analysis"]
+            proj = analysis.get("project_summary", analysis.get("claim_summary", {}))
+            overall = analysis.get("overall_assessment", {})
+
+            # Only enrich when the analysis has meaningful data
+            if overall and proj.get("applicant_name") not in (None, "", "N/A", "Pending Analysis"):
+                detail["applicant_name"] = proj.get("applicant_name", detail["applicant_name"])
+                detail["policy_number"] = proj.get("policy_number", detail["policy_number"])
+                detail["medical_case"] = proj.get("medical_case", detail["medical_case"])
+                detail["diagnosis"] = proj.get("diagnosis", detail["diagnosis"])
+                detail["procedure"] = proj.get("procedure", detail["procedure"])
+                detail["hospital_name"] = proj.get("hospital_name", detail["hospital_name"])
+                detail["hospital_location"] = proj.get("hospital_location", detail["hospital_location"])
+                detail["claimed_amount"] = proj.get("claimed_amount", detail["claimed_amount"])
+                detail["readiness_score"] = overall.get("readiness_score", detail["readiness_score"])
+                detail["risk_level"] = overall.get("risk_level", detail["risk_level"])
+                detail["submission_status"] = overall.get("submission_status", detail["submission_status"])
+                detail["is_analyzed"] = True
+                detail["final_suggestion"] = overall.get("final_suggestion")
+                detail["coverage_status"] = overall.get("coverage_status")
+
+        enriched.append(detail)
+
+    return ClaimsListResponse(total=len(enriched), claims=enriched)
+
+
+@router.post("/start-claim-session")
+async def start_claim_session(body: StartClaimSessionRequest):
+    """
+    Creates a new chat session tied to the given claim_id and immediately
+    runs the LangGraph claim workflow so the first response already contains
+    the full analysis.
+
+    Flow:
+      1. Verify the claim exists in the Claims collection.
+      2. Create a new ChatSession document.
+      3. Run claim_workflow and persist the result on the session.
+      4. Return session_id + the AI's first analysis message so the frontend
+         can drop straight into the claim_message conversation loop.
+
+    After this call, use POST /api/chat/claim_message with the returned
+    session_id to continue the conversation (approve / reject / revise /
+    Q&A — all handled there with full email notifications).
+    """
+    claim_id = body.claim_id.strip()
+
+    # 1. Verify claim exists
+    claim_doc = await Claims.find_one({"claim_id": claim_id})
+    if not claim_doc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Claim '{claim_id}' not found in database.",
+        )
+
+    # 2. Create session
+    session_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    session_doc = {
+        "session_id": session_id,
+        "claim_id": claim_id,
+        "current_claim_id": claim_id,
+        "processing_mode": "single_claim",
+        "created_at": now,
+        "messages": [],
+    }
+    await ChatSessions.insert_one(session_doc)
+    logger.info("Created session %s for claim %s", session_id, claim_id)
+
+    # 3. Run the LangGraph workflow
+    initial_state = {
+        "session_id": session_id,
+        "claim_id": claim_id,
+        "claim_folder": "",
+        "raw_files": [],
+        "classified_files": [],
+        "missing_docs": [],
+        "document_analyses": [],
+        "aggregated_result": {},
+        "bill_amount": None,
+        "settlement_amount": None,
+        "deduction_percentage": 0,
+        "is_ready": False,
+        "response_message": "",
+        "error": None,
+    }
+
+    try:
+        result = await claim_workflow.ainvoke(initial_state)
+    except Exception as exc:
+        logger.error("Workflow failed for claim %s: %s", claim_id, exc)
+        raise HTTPException(status_code=500, detail=f"Claim analysis failed: {exc}")
+
+    response_msg: str = result.get("response_message", "")
+    agg: dict = result.get("aggregated_result", {})
+    has_data = bool(agg)
+
+    # 4. Compute session flags (same logic as Branch D in claim_message)
+    is_ready = result.get("is_ready", False)
+    settle_amt = result.get("settlement_amount")
+    s_pending = bool(is_ready and settle_amt is not None)
+
+    suggest_provider = False
+    if has_data:
+        overall = agg.get("overall_assessment", {})
+        is_not_ready = overall.get("submission_status") == "Not Ready"
+        suggestion = overall.get("final_suggestion")
+        detected_issues = overall.get("all_detected_issues", [])
+        coverage_status = overall.get("coverage_status", "")
+
+        exclusion_keywords = [
+            "exclusion", "not covered", "excluded", "policy clause",
+            "cosmetic", "pre-existing", "waiting period", "non-payable",
+        ]
+        has_policy_exclusion = any(
+            any(k in issue.lower() for k in exclusion_keywords)
+            for issue in detected_issues
+        )
+        is_not_covered = "not covered" in coverage_status.lower() if coverage_status else False
+
+        if has_policy_exclusion or is_not_covered:
+            suggest_provider = False
+        else:
+            suggest_provider = suggestion == "REJECT" or is_not_ready
+
+    # 5. Persist workflow result on session
+    session_update: dict = {
+        "claim_analysis": agg if has_data else None,
+        "settlement_pending": s_pending,
+        "provider_request_suggested": suggest_provider,
+        "settlement_info": (
+            {
+                "claim_id": claim_id,
+                "bill_amount": result.get("bill_amount"),
+                "settlement_amount": settle_amt,
+                "deduction_percentage": result.get("deduction_percentage", 0),
+            }
+            if s_pending
+            else {}
+        ),
+    }
+
+    # Store the opening AI message in history
+    if response_msg:
+        session_update["messages"] = [
+            {
+                "role": "assistant",
+                "content": response_msg,
+                "timestamp": now.isoformat(),
+            }
+        ]
+
+    await ChatSessions.update_one(
+        {"session_id": session_id},
+        {"$set": session_update},
+    )
+    logger.info(
+        "Session %s initialised: settlement_pending=%s, provider_request_suggested=%s",
+        session_id, s_pending, suggest_provider,
+    )
+
+    # 6. Build claim summary for the response
+    claim_detail = {
+        "claim_id": claim_id,
+        "applicant_name": claim_doc.get("applicant_name", "Pending Analysis"),
+        "policy_number": claim_doc.get("policy_number", "Pending Analysis"),
+        "medical_case": claim_doc.get("medical_case", "Pending Analysis"),
+        "hospital_name": claim_doc.get("hospital_name", "Pending Analysis"),
+        "claimed_amount": claim_doc.get("claimed_amount"),
+        "readiness_score": claim_doc.get("readiness_score", 0),
+        "risk_level": claim_doc.get("risk_level", "N/A"),
+        "submission_status": claim_doc.get("submission_status", "Not Analyzed"),
+        "is_analyzed": has_data,
+    }
+    if has_data:
+        proj = agg.get("project_summary", agg.get("claim_summary", {}))
+        overall_a = agg.get("overall_assessment", {})
+        claim_detail.update({
+            "applicant_name": proj.get("applicant_name", claim_detail["applicant_name"]),
+            "policy_number": proj.get("policy_number", claim_detail["policy_number"]),
+            "medical_case": proj.get("medical_case", claim_detail["medical_case"]),
+            "hospital_name": proj.get("hospital_name", claim_detail["hospital_name"]),
+            "claimed_amount": proj.get("claimed_amount", claim_detail["claimed_amount"]),
+            "readiness_score": overall_a.get("readiness_score", claim_detail["readiness_score"]),
+            "risk_level": overall_a.get("risk_level", claim_detail["risk_level"]),
+            "submission_status": overall_a.get("submission_status", claim_detail["submission_status"]),
+            "final_suggestion": overall_a.get("final_suggestion"),
+            "coverage_status": overall_a.get("coverage_status"),
+            "settlement_pending": s_pending,
+            "settlement_amount": settle_amt,
+            "bill_amount": result.get("bill_amount"),
+        })
+
+    return {
+        "session_id": session_id,
+        "claim_id": claim_id,
+        "message": response_msg,
+        "has_analysis_data": has_data,
+        "claim": claim_detail,
     }

@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     EMAIL_POLL_INTERVAL_SECONDS: int = 30  # How often to check for new emails
     EMAIL_LISTENER_ENABLED: bool = True  # Toggle the listener on/off
 
+    @property
+    def email_listener_configured(self) -> bool:
+        """Check if email listener is properly configured with credentials."""
+        return (
+            self.EMAIL_LISTENER_ENABLED and 
+            self.IMAP_USERNAME is not None and 
+            self.IMAP_PASSWORD is not None and
+            self.IMAP_USERNAME.strip() != "" and
+            self.IMAP_PASSWORD.strip() != ""
+        )
+
     model_config = SettingsConfigDict(env_file='./.env', extra='ignore')
 
 

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form, BackgroundTasks
+from pydantic import BaseModel
 from typing import List, Optional
 import asyncio
 import json
@@ -31,6 +32,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 BLOB_PREFIX = ""  # blobs are stored as "<CLAIM_ID>/<filename>"
+
+
+class StartChatRequest(BaseModel):
+    session_id: Optional[str] = None
+    message: Optional[str] = None
 
 
 def generate_claim_id() -> str:
@@ -157,7 +163,7 @@ async def get_all_claims():
     """
     try:
         # Use database as primary source
-        cursor = Claims.find({}).sort("created_at", -1)
+        cursor = Claims.find({}).sort([("created_at", -1)])
         print("Fetching claims from DB",cursor)
         db_claims = [doc async for doc in cursor]
         print(f"Found {db_claims} claims in DB")
@@ -446,7 +452,7 @@ async def get_resolved_claims(
     cursor = ResolvedClaims.find(
         {},
         {"claim_analysis": 0},  # exclude heavy nested analysis by default
-    ).sort("resolved_at", -1).skip(skip).limit(limit)
+    ).sort([("resolved_at", -1)]).skip(skip).limit(limit)
 
     claims = [_serialize(doc) async for doc in cursor]
     total = await ResolvedClaims.count_documents({})
@@ -472,6 +478,7 @@ async def get_resolved_claim(claim_id: str):
         )
     return _serialize(doc)
 
+
 @router.get("/claim/{claim_id}", summary="Get a single claim by ID")
 async def get_claim(claim_id: str):
     """
@@ -486,17 +493,252 @@ async def get_claim(claim_id: str):
     return _serialize(doc)
 
 
-@router.get("/email-listener/status", summary="Get email listener status")
-async def get_email_listener_status():
+@router.post("/start-claims-chat", summary="Start or continue a claims chat session")
+async def start_claims_chat(request: Optional[StartChatRequest] = None):
     """
-    Returns the current status of the background email listener:
-    - whether it is running
-    - when it last polled the inbox
-    - how many emails/claims have been processed
-    - any recent errors
+    Single endpoint for the full claims chat lifecycle.
+
+    Step 1 — No body (or no session_id):
+        Creates a session and immediately returns all claims from the DB.
+        The response includes session_id + claims list + a welcome message.
+
+    Step 2+ — Body with session_id + message:
+        Continues the chat. Send the Claim ID as the first message to load
+        and analyze that claim. All subsequent messages (Q&A, approve, reject,
+        custom settlement) are handled here in the same session.
+
+    Request:
+        {}                                          ← step 1: get claims + session
+        {"session_id": "...", "message": "CLAIM_ID_XXXXXX"}  ← load a claim
+        {"session_id": "...", "message": "what is the risk level?"}
+        {"session_id": "...", "message": "yes"}     ← approve
+        {"session_id": "...", "message": "REJECT"}  ← reject
+        {"session_id": "...", "message": "45000"}   ← custom settlement
     """
-    status = get_listener_status()
-    status["poll_interval_seconds"] = settings.EMAIL_POLL_INTERVAL_SECONDS
-    status["imap_username"] = settings.IMAP_USERNAME
-    status["listener_enabled_in_config"] = settings.EMAIL_LISTENER_ENABLED
-    return status
+    from app.routers.chat import create_session, send_claim_message
+    from app.routers.chat import ChatRequest as ClaimChatRequest
+
+    # ── Step 1: no session yet → create one and return all claims ──────────
+    if not request or not request.session_id:
+        # Create session
+        session_response = await create_session()
+        session_id = session_response.session_id
+
+        # Fetch all claims from DB
+        cursor = Claims.find({}).sort([("created_at", -1)])
+        db_claims = [doc async for doc in cursor]
+
+        if not db_claims:
+            raise HTTPException(status_code=404, detail="No claims found in database")
+
+        # Enrich with analysis data from ChatSessions
+        enriched = []
+        for doc in db_claims:
+            cid = doc["claim_id"]
+            details = {
+                "claim_id": cid,
+                "applicant_name": doc.get("applicant_name", "Pending Analysis"),
+                "policy_number": doc.get("policy_number", "Pending Analysis"),
+                "medical_case": doc.get("medical_case", "Pending Analysis"),
+                "hospital_name": doc.get("hospital_name", "Pending Analysis"),
+                "claimed_amount": doc.get("claimed_amount"),
+                "readiness_score": doc.get("readiness_score", 0),
+                "risk_level": doc.get("risk_level", "N/A"),
+                "submission_status": doc.get("submission_status", "Not Analyzed"),
+                "is_analyzed": doc.get("is_analyzed", False),
+                "created_at": doc.get("created_at"),
+            }
+            session_doc = await ChatSessions.find_one({"claim_id": cid})
+            if session_doc and session_doc.get("claim_analysis"):
+                analysis = session_doc["claim_analysis"]
+                proj = analysis.get("project_summary", analysis.get("claim_summary", {}))
+                overall = analysis.get("overall_assessment", {})
+                details.update({
+                    "applicant_name": proj.get("applicant_name", details["applicant_name"]),
+                    "policy_number": proj.get("policy_number", details["policy_number"]),
+                    "medical_case": proj.get("medical_case", details["medical_case"]),
+                    "hospital_name": proj.get("hospital_name", details["hospital_name"]),
+                    "claimed_amount": proj.get("claimed_amount", details["claimed_amount"]),
+                    "readiness_score": overall.get("readiness_score", details["readiness_score"]),
+                    "risk_level": overall.get("risk_level", details["risk_level"]),
+                    "submission_status": overall.get("submission_status", details["submission_status"]),
+                    "final_suggestion": overall.get("final_suggestion"),
+                    "coverage_status": overall.get("coverage_status"),
+                    "is_analyzed": True,
+                })
+            enriched.append(details)
+
+        total = len(enriched)
+        claims_lines = []
+        for i, c in enumerate(enriched, 1):
+            risk_emoji = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(c["risk_level"], "⚪")
+            status_emoji = "✅" if c["is_analyzed"] else "⏳"
+            amt = c["claimed_amount"]
+            amt_str = f"₹{amt:,}" if amt else "Pending"
+            claims_lines.append(
+                f"{i}. {c['claim_id']} {status_emoji} {risk_emoji} — "
+                f"{c['applicant_name']} | {c['hospital_name']} | {amt_str} | {c['risk_level']} Risk"
+            )
+
+        welcome = (
+            f"👋 You have {total} claim{'s' if total != 1 else ''} assigned to you.\n\n"
+            + "\n".join(claims_lines)
+            + "\n\nWhich claim would you like to discuss? Reply with the Claim ID "
+            f"(e.g. CLAIM_ID_123456) and I'll load the full analysis for you."
+        )
+
+        return {
+            "session_id": session_id,
+            "total_claims": total,
+            "claims": enriched,
+            "message": welcome,
+        }
+
+    # ── Step 2+: session exists → forward message to claim_message logic ───
+    if not request.message:
+        raise HTTPException(status_code=400, detail="Provide a 'message' to continue the chat.")
+
+    chat_req = ClaimChatRequest(session_id=request.session_id, message=request.message)
+    return await send_claim_message(chat_req)
+
+
+
+@router.post("/process-claim-ids", summary="Process multiple claim IDs from database")
+async def process_claim_ids():
+    """
+    Retrieves claim IDs from the database and creates a session to process them
+    through the approval/revise/reject workflow.
+    
+    Returns:
+    - session_id: Chat session ID for processing
+    - claim_ids: List of available claim IDs from database
+    - message: Initial greeting message
+    """
+    try:
+        # Get claim IDs from database
+        cursor = Claims.find({}).sort([("created_at", -1)])
+        db_claims = [doc async for doc in cursor]
+        
+        if not db_claims:
+            raise HTTPException(
+                status_code=404, 
+                detail="No claims found in database"
+            )
+        
+        # Extract claim IDs
+        claim_ids = [claim["claim_id"] for claim in db_claims]
+        
+        # Create new session
+        from app.routers.chat import create_session, GREETING_MESSAGE
+        session_response = await create_session()
+        
+        # Update session with claim IDs context
+        await ChatSessions.update_one(
+            {"session_id": session_response.session_id},
+            {
+                "$set": {
+                    "available_claim_ids": claim_ids,
+                    "processing_mode": "claim_ids",
+                    "total_claims": len(claim_ids)
+                }
+            }
+        )
+        
+        return {
+            "session_id": session_response.session_id,
+            "claim_ids": claim_ids,
+            "total_claims": len(claim_ids),
+            "message": f"Found {len(claim_ids)} claims in database. Please specify which claim ID you'd like to process, or I can help you review them one by one.",
+            "greeting": GREETING_MESSAGE
+        }
+        
+    except Exception as exc:
+        logger.error("Failed to process claim IDs: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve claim IDs: {exc}")
+
+
+@router.post("/process-specific-claim", summary="Process a specific claim ID")
+async def process_specific_claim(
+    session_id: str = Form(...),
+    claim_id: str = Form(...)
+):
+    """
+    Processes a specific claim ID through the workflow.
+    
+    Args:
+    - session_id: Existing chat session ID
+    - claim_id: Specific claim ID to process
+    
+    Returns:
+    - session_id: Chat session ID
+    - claim_id: The claim being processed
+    - analysis: Claim analysis data
+    - message: Processing status message
+    """
+    try:
+        # Verify claim exists
+        claim_doc = await Claims.find_one({"claim_id": claim_id})
+        if not claim_doc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Claim '{claim_id}' not found in database"
+            )
+        
+        # Check if session exists
+        session = await ChatSessions.find_one({"session_id": session_id})
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail="Session not found"
+            )
+        
+        # Get claim analysis from ChatSessions if available
+        analysis = session.get("claim_analysis")
+        
+        # If no analysis exists, trigger background analysis
+        if not analysis:
+            await trigger_background_analysis(claim_id)
+            
+            # Wait a bit for analysis to complete (or check existing)
+            import asyncio
+            await asyncio.sleep(2)
+            
+            # Try to get analysis again
+            updated_session = await ChatSessions.find_one({"session_id": session_id})
+            analysis = updated_session.get("claim_analysis")
+        
+        # Update session with current claim context
+        await ChatSessions.update_one(
+            {"session_id": session_id},
+            {
+                "$set": {
+                    "current_claim_id": claim_id,
+                    "claim_analysis": analysis,
+                    "claim_id": claim_id  # For compatibility with existing workflow
+                }
+            }
+        )
+        
+        return {
+            "session_id": session_id,
+            "claim_id": claim_id,
+            "claim_details": {
+                "applicant_name": claim_doc.get("applicant_name", "Pending Analysis"),
+                "policy_number": claim_doc.get("policy_number", "Pending Analysis"),
+                "medical_case": claim_doc.get("medical_case", "Pending Analysis"),
+                "hospital_name": claim_doc.get("hospital_name", "Pending Analysis"),
+                "claimed_amount": claim_doc.get("claimed_amount"),
+                "readiness_score": claim_doc.get("readiness_score", 0),
+                "risk_level": claim_doc.get("risk_level", "N/A"),
+                "submission_status": claim_doc.get("submission_status", "Not Analyzed"),
+                "is_analyzed": claim_doc.get("is_analyzed", False)
+            },
+            "analysis": analysis,
+            "message": f"Claim '{claim_id}' is now loaded and ready for processing. You can ask questions about this claim or proceed with approval/revise/reject actions."
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Failed to process claim %s: %s", claim_id, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to process claim: {exc}")
