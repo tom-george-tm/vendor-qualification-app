@@ -205,7 +205,7 @@ Return ONLY the following JSON structure, exact keys and data types, no markdown
     "documents_analyzed": <count>
   }},
   "overall_assessment": {{
-    "readiness_score": <integer 0-100>,
+    "readiness_score": 0,
     "risk_level": "Low" | "Moderate" | "High" | "Critical",
     "submission_status": "Ready" | "Not Ready",
     "coverage_status": "Fully Covered" | "Partially Covered (X%)" | "Not Covered",
@@ -246,3 +246,61 @@ Return ONLY the following JSON structure, exact keys and data types, no markdown
   ]
 }}"""
     return prompt
+
+
+# ---------------------------------------------------------------------------
+# Deterministic readiness score calculator
+# ---------------------------------------------------------------------------
+
+# Risk level -> numeric weight mapping
+_RISK_WEIGHTS = {
+    'na': 1.0,
+    'minor': 0.75,
+    'moderate': 0.5,
+    'critical': 0.0,
+}
+
+
+def compute_readiness_score(document_analyses: list) -> float:
+    """
+    Compute the Doc Readiness Score deterministically from checklist results.
+
+    Formula
+    -------
+    For each document:
+        doc_score = sum(criterion_weight) / total_criteria
+    Overall score = average(doc_scores)
+    Readiness Score = Overall score x 100  (rounded to 2 d.p.)
+
+    Risk weights:
+        NA (compliant) -> 1.0
+        minor          -> 0.75
+        moderate       -> 0.5
+        critical       -> 0.0
+
+    Example:
+        Doc 1 - crt 1: minor (0.75), crt 2: critical (0.0)  -> doc_score = 0.375
+        Doc 2 - crt 1: minor (0.75), crt 2: minor (0.75)    -> doc_score = 0.75
+        Overall = (0.375 + 0.75) / 2 = 0.5625  ->  Score = 56.25
+
+    Returns a float 0-100, or 0.0 if no criteria are found.
+    """
+    doc_scores = []
+
+    for doc in document_analyses:
+        checklist = doc.get('checklist_results', [])
+        if not checklist:
+            continue  # skip docs with no checklist data (e.g. error docs)
+
+        weights = [
+            _RISK_WEIGHTS.get((item.get('risk_level') or 'na').lower(), 1.0)
+            for item in checklist
+        ]
+        doc_score = sum(weights) / len(weights)
+        doc_scores.append(doc_score)
+
+    if not doc_scores:
+        return 0.0
+
+    overall = sum(doc_scores) / len(doc_scores)
+    return round(overall * 100, 2)

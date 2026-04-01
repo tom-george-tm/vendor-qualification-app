@@ -28,7 +28,7 @@ from typing_extensions import TypedDict
 
 from app.database import ChatSessions, Claims
 from app.config import settings
-from app.document_analysis import build_aggregator_prompt, build_analysis_prompt
+from app.document_analysis import build_aggregator_prompt, build_analysis_prompt, compute_readiness_score
 from app.azure_blob import blob_prefix_exists, list_blobs_in_prefix, download_blob, get_blob_url
 from app.email import Email
 
@@ -367,7 +367,18 @@ async def node_aggregate(state: ClaimWorkflowState) -> dict:
     # The LLM can be inconsistent; these rules are the source of truth.
     overall = aggregated.get("overall_assessment", {})
     missing_docs = state["missing_docs"]
-    score = overall.get("readiness_score", 0)
+
+    # Override readiness_score with the deterministic formula:
+    #   Each criterion risk_level → weight (NA=1.0, minor=0.75, moderate=0.5, critical=0.0)
+    #   doc_score = avg(weights),  overall = avg(doc_scores),  score = overall × 100
+    computed_score = compute_readiness_score(state["document_analyses"])
+    overall["readiness_score"] = computed_score
+    logger.info(
+        "Claim %s — deterministic readiness score computed: %.2f",
+        state["claim_id"], computed_score,
+    )
+
+    score = computed_score
     critical = overall.get("critical_issues", 0)
     moderate = overall.get("moderate_issues", 0)
     suggestion = overall.get("final_suggestion", "")
