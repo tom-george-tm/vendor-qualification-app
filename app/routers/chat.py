@@ -616,17 +616,30 @@ async def send_claim_message(body: ChatRequest):
             except Exception as e:
                 logger.error("Error sending custom amount emails for %s: %s", s_claim_id, e)
             
+            if custom_amount < original_amount:
+                negotiation_note = (
+                    f"\n\n🤝 **Negotiation Accepted:** The CSR has approved a reduced settlement of **₹{custom_amount:,.2f}** "
+                    f"(₹{change_amount:,.2f} below the calculated amount), reflecting the identified billing discrepancies "
+                    f"such as excess room rent, non-payable consumables, and pharmacy overcharging."
+                )
+            else:
+                negotiation_note = (
+                    f"\n\n📈 **Amount Adjusted Upward:** Settlement increased by ₹{change_amount:,.2f} above the calculated figure."
+                )
+
             response_msg = (
-                f"✅ **Claim `{s_claim_id}` — Processed with Custom Amount!**\n\n"
-                f"💰 **Settlement Details:**\n"
+                f"✅ **Claim `{s_claim_id}` — Negotiated Settlement Processed**\n\n"
+                f"💰 **Settlement Breakdown:**\n"
                 f"| Item | Amount |\n|------|--------|\n"
-                f"| Original Settlement | ₹{original_amount:,.2f} |\n"
-                f"| **Custom Amount** | **₹{custom_amount:,.2f}** |\n"
-                f"| Change ({change_type}) | ₹{change_amount:,.2f} |\n"
-                f"| Total Bill | ₹{b_amount:,.2f} |\n\n"
+                f"| Total Bill Amount | ₹{b_amount:,.2f} |\n"
+                f"| Calculated Settlement | ₹{original_amount:,.2f} |\n"
+                f"| **Final Approved Amount** | **₹{custom_amount:,.2f}** |\n"
+                f"| {'Negotiated Deduction' if custom_amount < original_amount else 'Upward Adjustment'} | ₹{change_amount:,.2f} |"
+                f"{negotiation_note}\n\n"
                 f"📤 **Actions Completed:**\n"
-                f"  - Custom settlement amount **{change_type}** by ₹{change_amount:,.2f}\n"
-                f"  - Claim status updated to **Processed**\n"
+                f"  - Settlement amount finalised at **₹{custom_amount:,.2f}**\n"
+                f"  - Claim status updated to **Approved (Negotiated)**\n"
+                f"  - EOB generated with negotiated amount\n"
                 f"  - Notification emails sent to Policyholder & Provider\n\n"
                 f"---\n\n"
                 f"✅ This claim is now **closed**. Ready for the next one!\n\n"

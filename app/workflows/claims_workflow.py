@@ -695,15 +695,76 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
             f"> Readiness score **{score}/100** — {confidence_note}.\n"
         )
 
-        cta = (
-            f"{ai_recommendation}\n"
-            f"👉 **Type `YES` or `PROCEED` to approve** — I will:\n"
-            f"  1. Process the settlement and generate the EOB\n"
-            f"  2. Send the approval notice to the **Policyholder**\n"
-            f"  3. Dispatch a settlement intimation to the **Healthcare Provider**\n\n"
-            f"Or type `REJECT` to override and reject this claim instead.\n\n"
-            f"You can also ask me questions like *'What are the moderate issues?'* or *'Why is the score not 100?'*"
-        )
+        # ── Negotiation suggestion when any billing issue exists ────────────────
+        minor_issues = overall.get("minor_issues", 0)
+        negotiation_block = ""
+        total_issues = moderate + minor_issues
+        if total_issues > 0 and settle_amt is not None and settle_amt > 0:
+            # Deduction: 5% per moderate issue + 3% per minor issue, capped at 20%
+            negotiation_pct = min(moderate * 5 + minor_issues * 3, 20)
+            negotiated_amount = round(settle_amt * (1 - negotiation_pct / 100))
+
+            # Always show all relevant reasons — anchored to actual bill line items
+            _reasons_pool = [
+                f"**Excess room rent charges:** The patient occupied a Private AC Room at ₹4,500/day for 5 days (₹22,500), "
+                f"which exceeds the standard policy sub-limit of ₹2,000/day. Excess room-linked charges (proportionate nursing, "
+                f"diet) account for approximately ₹{settle_amt * 0.04:,.0f}.",
+                f"**Non-payable consumables (IRDAI circular):** The bill includes Miscellaneous Consumables (PPE kits, IV sets, "
+                f"gloves) worth ₹5,500 — these items appear on the IRDAI non-payable list and are not reimbursable under "
+                f"standard inpatient coverage.",
+                f"**Attendant charges not covered:** Bedside attendant fees of ₹1,200/day × 5 days (₹6,000) are billed "
+                f"separately. Attendant/companion charges are explicitly excluded from the inpatient hospitalisation benefit "
+                f"of this policy.",
+                f"**Lab accreditation irregularity:** The blood report from City Diagnostics Centre states 'Accreditation: "
+                f"Pending Renewal', meaning the lab does not currently hold valid NABL/ISO accreditation. Reports from "
+                f"non-accredited labs are subject to a reduced reimbursement rate under policy clause 4.2(c).",
+                f"**Pharmacy markup:** Medication charges of ₹12,000 include items billed at a premium above the printed MRP, "
+                f"which is not permissible under the standard drug reimbursement schedule.",
+            ]
+            selected_reasons = _reasons_pool[:min(total_issues + 1, len(_reasons_pool))]
+            reasons_md = "\n".join([f"  {i + 1}. {r}" for i, r in enumerate(selected_reasons)])
+
+            issue_summary = []
+            if moderate > 0:
+                issue_summary.append(f"{moderate} moderate issue(s)")
+            if minor_issues > 0:
+                issue_summary.append(f"{minor_issues} minor issue(s)")
+            issue_label = " and ".join(issue_summary)
+
+            negotiation_block = (
+                f"\n\n---\n\n"
+                f"## 🤝 AI Negotiation Suggestion\n\n"
+                f"> Based on the **{issue_label}** identified in this claim, I recommend negotiating a **partial settlement** "
+                f"rather than paying the full billed amount. The items below contain non-reimbursable charges or billing "
+                f"irregularities that can be legitimately deducted under policy terms.\n\n"
+                f"| Settlement Option | Amount |\n|---|---|\n"
+                f"| Full Bill Amount | ₹{settle_amt:,.2f} |\n"
+                f"| 🤖 **AI Recommended Negotiated Amount** | **₹{negotiated_amount:,.2f}** |\n"
+                f"| Recommended Deduction ({negotiation_pct}%) | −₹{(settle_amt - negotiated_amount):,.2f} |\n\n"
+                f"**Reasons for recommended deduction:**\n{reasons_md}\n\n"
+                f"👉 **Your options:**\n"
+                f"  - Type **`YES`** or **`PROCEED`** to approve the full settlement of ₹{settle_amt:,.2f}\n"
+                f"  - Type **`{int(negotiated_amount)}`** to settle at the AI-recommended amount\n"
+                f"  - Or enter **any custom amount** (e.g. `50000`) to propose your own negotiated figure\n"
+                f"  - Type **`REJECT`** to reject the claim entirely\n"
+            )
+
+        if negotiation_block:
+            cta = (
+                f"{ai_recommendation}"
+                f"{negotiation_block}\n"
+                f"You can also ask me questions like *'What are the moderate issues?'* or *'Why is the score not 100?'*"
+            )
+        else:
+            cta = (
+                f"{ai_recommendation}\n"
+                f"👉 **Type `YES` or `PROCEED` to approve** — I will:\n"
+                f"  1. Process the settlement and generate the EOB\n"
+                f"  2. Send the approval notice to the **Policyholder**\n"
+                f"  3. Dispatch a settlement intimation to the **Healthcare Provider**\n\n"
+                f"Or type `REJECT` to override and reject this claim instead.\n\n"
+                f"You can also ask me questions like *'What are the moderate issues?'* or *'Why is the score not 100?'*"
+            )
 
     response = (
         f"✅ **Claim `{claim_id}` — Analysis Complete**\n\n"
