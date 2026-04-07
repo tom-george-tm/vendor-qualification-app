@@ -753,7 +753,7 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
             cta = (
                 f"{ai_recommendation}"
                 f"{negotiation_block}\n"
-                f"You can also ask me questions like *'What are the moderate issues?'* or *'Why is the score not 100?'*"
+                f"You can also ask me questions like *'What are the moderate issues?'*"
             )
         else:
             cta = (
@@ -763,7 +763,7 @@ async def node_format_response(state: ClaimWorkflowState) -> dict:
                 f"  2. Send the approval notice to the **Policyholder**\n"
                 f"  3. Dispatch a settlement intimation to the **Healthcare Provider**\n\n"
                 f"Or type `REJECT` to override and reject this claim instead.\n\n"
-                f"You can also ask me questions like *'What are the moderate issues?'* or *'Why is the score not 100?'*"
+                f"You can also ask me questions like *'What are the moderate issues?'*"
             )
 
     response = (

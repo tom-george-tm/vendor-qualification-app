@@ -108,7 +108,8 @@ STRICT ACCURACY RULES (these are non-negotiable):
    - Report the `coverage_status` and `risk_level` field values exactly
    - Do NOT override or reinterpret these values
 5. When discussing issues, list ONLY the issues from `all_detected_issues`.
-6. If information is not present in the analysis data, say something like: "Hmm, I don't see that detail in the current analysis — it might not have been captured."
+6. For policy balance questions, ALWAYS use the exact numbers from the POLICY BALANCE block above — never say "I don't see that detail". The numbers are always provided.
+7. If something is genuinely not in either data block, say: "That detail isn't captured in this claim's analysis."
 
 TONE RULES:
 - Be conversational and warm. Write like a helpful person, not a policy document.
@@ -442,9 +443,17 @@ async def send_claim_message(body: ChatRequest):
         proceed_keywords = {"yes", "proceed", "approve", "accept", "confirm", "ok", "okay"}
         is_proceed = bool(proceed_keywords & set(user_msg.split()))
 
-        # Try to parse a custom numeric amount (increase or decrease)
+        # Try to parse a custom numeric amount — but only if the message looks like
+        # a settlement instruction, NOT a question that happens to contain a number.
+        _question_words = {"why", "what", "how", "when", "where", "who", "which",
+                           "is", "are", "can", "does", "do", "will", "would",
+                           "explain", "tell", "show", "describe", "list"}
+        _is_question = (
+            "?" in user_msg
+            or user_msg.split()[0] in _question_words if user_msg.split() else False
+        )
         custom_amount: Optional[float] = None
-        if not is_proceed:
+        if not is_proceed and not _is_question:
             amt_match = re.search(r"(\d[\d,]*\.?\d*)", user_msg.replace(" ", ""))
             if amt_match:
                 try:
@@ -856,33 +865,45 @@ async def send_claim_message(body: ChatRequest):
     # ── Branch C: AI-powered Q&A with full policy context ───────────────────
     elif stored_analysis:
         # Always fetch live policy balance and inject it — AI decides what to use
-        _proj = stored_analysis.get("claim_summary", stored_analysis.get("project_summary", {}))
-        _policy_number = _proj.get("policy_number", "")
-        _policy_context: dict = {}
+        # Try every known location where policy_number may live
+        _proj = stored_analysis.get("project_summary") or stored_analysis.get("claim_summary") or {}
+        _policy_number = (
+            _proj.get("policy_number")
+            or stored_analysis.get("policy_number")
+            or stored_analysis.get("overall_assessment", {}).get("policy_number")
+            or ""
+        )
+        _policy_number = _policy_number if _policy_number not in ("", "N/A", "Pending Analysis", None) else ""
 
-        if _policy_number and _policy_number not in ("", "N/A", "Pending Analysis"):
+        _sum_insured = POLICY_SUM_INSURED
+        _total_claimed = 0.0
+        _remaining = _sum_insured
+        _prior_claims_list = []
+
+        if _policy_number:
             _history_cursor = ResolvedClaims.find({"policy_number": _policy_number})
             _history = [doc async for doc in _history_cursor]
-            _sum_insured = POLICY_SUM_INSURED
             _total_claimed = sum(doc.get("final_amount", 0) or 0 for doc in _history)
             _remaining = max(_sum_insured - _total_claimed, 0)
-            _policy_context = {
-                "policy_number": _policy_number,
-                "sum_insured": _sum_insured,
-                "total_previously_settled": _total_claimed,
-                "remaining_balance": _remaining,
-                "prior_claims": [
-                    {
-                        "claim_id": doc.get("claim_id"),
-                        "final_amount": doc.get("final_amount", 0),
-                        "resolution_type": doc.get("resolution_type", "approved"),
-                        "resolved_at": doc.get("resolved_at", "N/A").strftime("%d-%b-%Y")
-                        if hasattr(doc.get("resolved_at"), "strftime")
-                        else str(doc.get("resolved_at", "N/A"))[:10],
-                    }
-                    for doc in _history
-                ],
-            }
+            _prior_claims_list = [
+                {
+                    "claim_id": doc.get("claim_id"),
+                    "final_amount": doc.get("final_amount", 0),
+                    "resolution_type": doc.get("resolution_type", "approved"),
+                    "resolved_at": doc.get("resolved_at", "N/A").strftime("%d-%b-%Y")
+                    if hasattr(doc.get("resolved_at"), "strftime")
+                    else str(doc.get("resolved_at", "N/A"))[:10],
+                }
+                for doc in _history
+            ]
+
+        _policy_context = {
+            "policy_number": _policy_number or "N/A",
+            "sum_insured": _sum_insured,
+            "total_previously_settled": _total_claimed,
+            "remaining_balance": _remaining,
+            "prior_claims": _prior_claims_list,
+        }
 
         enriched_analysis = {**stored_analysis, "policy_balance": _policy_context}
         response_msg = await _get_ai_qa_response(body.message, messages_history, enriched_analysis, is_settlement_pending=settlement_pending)
@@ -1187,24 +1208,22 @@ async def send_claim_message(body: ChatRequest):
 async def _get_ai_qa_response(message: str, history: list, analysis: dict, is_settlement_pending: bool = False) -> str:
     """Helper to get a strictly grounded Q&A response from OpenAI."""
     # Pull policy_balance out first so it's always visible — never buried/truncated
-    policy_balance = analysis.get("policy_balance", {})
-    policy_balance_block = ""
-    if policy_balance:
-        pb = policy_balance
-        prior = pb.get("prior_claims", [])
-        prior_lines = "\n".join(
-            f"  - {c.get('claim_id')} | ₹{c.get('final_amount', 0):,.2f} | {c.get('resolution_type', '')} | {c.get('resolved_at', '')}"
-            for c in prior
-        ) or "  None"
-        policy_balance_block = (
-            "\n\n--- POLICY BALANCE (LIVE FROM DATABASE — USE THESE EXACT NUMBERS) ---\n"
-            f"Policy Number        : {pb.get('policy_number', 'N/A')}\n"
-            f"Total Sum Insured    : ₹{pb.get('sum_insured', 0):,.2f}\n"
-            f"Total Settled So Far : ₹{pb.get('total_previously_settled', 0):,.2f}\n"
-            f"Remaining Balance    : ₹{pb.get('remaining_balance', 0):,.2f}\n"
-            f"Prior Claims:\n{prior_lines}\n"
-            "--- END POLICY BALANCE ---"
-        )
+    # This block is ALWAYS injected so the AI never has to guess or hallucinate balance info
+    pb = analysis.get("policy_balance", {})
+    prior = pb.get("prior_claims", [])
+    prior_lines = "\n".join(
+        f"  - {c.get('claim_id')} | ₹{c.get('final_amount', 0):,.2f} | {c.get('resolution_type', '')} | {c.get('resolved_at', '')}"
+        for c in prior
+    ) or "  None (this is the first claim under this policy)"
+    policy_balance_block = (
+        "\n\n--- POLICY BALANCE (LIVE DATABASE DATA — USE ONLY THESE NUMBERS, DO NOT GUESS OR HALLUCINATE) ---\n"
+        f"Policy Number        : {pb.get('policy_number', 'N/A')}\n"
+        f"Total Sum Insured    : ₹{pb.get('sum_insured', POLICY_SUM_INSURED):,.2f}\n"
+        f"Total Settled So Far : ₹{pb.get('total_previously_settled', 0):,.2f}\n"
+        f"Remaining Balance    : ₹{pb.get('remaining_balance', POLICY_SUM_INSURED):,.2f}\n"
+        f"Prior Claims:\n{prior_lines}\n"
+        "--- END POLICY BALANCE ---"
+    )
 
     # Strip policy_balance from main JSON to avoid duplication
     analysis_without_balance = {k: v for k, v in analysis.items() if k != "policy_balance"}
