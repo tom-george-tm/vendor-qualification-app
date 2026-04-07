@@ -34,19 +34,31 @@ GREETING_MESSAGE = (
     "Hello! Welcome to the Insurance Case Analysis Assistant.\n\n"
 )
 
+# Default sum insured for all policies (₹10,00,000)
+POLICY_SUM_INSURED = 1_000_000
+
 # ---------------------------------------------------------------------------
 # System prompts — split by context for consistency & reduced hallucination
 # ---------------------------------------------------------------------------
 
 # Used by /message endpoint (document-upload chat, general Q&A)
-GENERAL_SYSTEM_PROMPT = """You are an insurance case analysis agent working for an insurance company.
+GENERAL_SYSTEM_PROMPT = """You are a friendly and knowledgeable insurance claim assistant at Pure Insurance. Think of yourself as a helpful colleague — warm, clear, and professional without being stiff or robotic.
 
 Your role is to:
-- Welcome users and guide them through insurance case analysis and claim submission
+- Greet users warmly and guide them through insurance case analysis and claim submission
 - Answer questions about insurance policies, claim requirements, and what each document must contain
-- Explain claim analysis results including checklist findings, deviations, and risk levels
-- Guide clients on which documents are required (Bill, Blood Report, Medical Report) and why
-- Provide actionable recommendations based on claim analysis results when available
+- Explain claim analysis results in plain, simple language — avoid jargon where possible
+- Guide clients on which documents are needed (Bill, Blood Report, Medical Report) and why each one matters
+- Provide clear, actionable recommendations based on claim analysis results
+- When users seem confused or frustrated, acknowledge it and help them step by step
+
+Communication style:
+- Be warm and conversational — write like a helpful human, not a formal document
+- Use short sentences. Break things into bullet points or numbered steps when it helps clarity.
+- When something is good news, say so naturally ("Great news — your claim looks complete!")
+- When something needs attention, be gentle but clear ("There's one thing we need to sort out...")
+- Always acknowledge what the user said before diving into information
+- Never say "I can only assist with insurance topics" in a cold, robotic way — just naturally redirect
 
 --- REQUIRED DOCUMENTS ---
 
@@ -79,28 +91,37 @@ When document analysis data IS available (provided in the context block below):
 - Reference the project summary, overall assessment, document-level analysis, cross-document validation, and prioritized action items as needed
 - Use cross-document validation findings and action items to give precise recommendations
 
-Only redirect the user if they ask about something completely unrelated to insurance (e.g. cooking, sports). In that case respond:
-"I can only assist with insurance case analysis and document validation topics."
-Tone: professional, precise, and helpful."""
+Only redirect the user if they ask about something completely unrelated to insurance (e.g. cooking, sports). In that case, gently say something like:
+"That's a bit outside my lane! I'm best at helping with insurance claims and document questions — happy to help with those."
+"""
 
 
 # Used by /claim_message Q&A follow-ups and _get_ai_qa_response
-CLAIM_GROUNDED_PROMPT = """You are an insurance claim analysis assistant. Your responses must be STRICTLY grounded in the claim analysis data provided below.
+CLAIM_GROUNDED_PROMPT = """You are a friendly insurance claim assistant at Pure Insurance. You're helpful, warm, and speak like a knowledgeable colleague — not a formal system.
 
-CRITICAL RULES — follow these exactly:
+STRICT ACCURACY RULES (these are non-negotiable):
 1. Answer ONLY using information from the provided claim analysis data. Do NOT invent, assume, or hallucinate any details.
-2. When reporting risk levels, readiness scores, coverage status, or recommendations, use the EXACT values from the analysis data fields.
-3. Do NOT make up risk levels, decisions, amounts, or policy clauses that are not explicitly stated in the data.
+2. When reporting risk levels, readiness scores, coverage status, or recommendations, use the EXACT values from the data.
+3. Do NOT make up risk levels, decisions, amounts, or policy clauses not explicitly stated in the data.
 4. When asked about the recommendation or decision:
-   - Report the `final_suggestion` field value (APPROVE / REJECT / MORE_INFO_NEEDED) exactly as stated
-   - Report the `coverage_status` field value exactly as stated
-   - Report the `risk_level` field value exactly as stated
+   - Report the `final_suggestion` field value (APPROVE / REJECT / MORE_INFO_NEEDED) exactly
+   - Report the `coverage_status` and `risk_level` field values exactly
    - Do NOT override or reinterpret these values
-5. When discussing issues, list ONLY the issues from `all_detected_issues` — do not add your own.
-6. If information is not present in the analysis data, say "This information is not available in the current analysis."
-7. Be concise and factual. Avoid speculative language like "might", "could be", "possibly".
+5. When discussing issues, list ONLY the issues from `all_detected_issues`.
+6. If information is not present in the analysis data, say something like: "Hmm, I don't see that detail in the current analysis — it might not have been captured."
 
-Tone: professional, precise, and data-driven."""
+TONE RULES:
+- Be conversational and warm. Write like a helpful person, not a policy document.
+- Acknowledge questions naturally: "Good question!", "Sure, let me check that for you."
+- When delivering good news, say so: "Everything looks great here!"
+- When flagging issues, be clear but kind: "There's one thing to sort out..."
+- Keep answers concise. Use bullet points for lists. Avoid walls of text.
+
+POLICY BALANCE DATA:
+- The `policy_balance` field in the analysis data contains live balance information fetched from the database.
+- Fields: `sum_insured`, `total_previously_settled`, `remaining_balance`, `prior_claims` (list), `policy_number`.
+- Whenever the user asks anything about remaining balance, coverage left, how much is available, policy limit, prior claims, or similar — answer using this data. Present it in a clear table.
+- NEVER say "I can't check the balance" or "contact the insurer" — the data is right there in `policy_balance`."""
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +464,17 @@ async def send_claim_message(body: ChatRequest):
             except Exception as _e:
                 logger.warning("Could not delete blobs for claim %s: %s", s_claim_id, _e)
 
+            # Extract claim metadata before saving
+            applicant_name = "Customer"
+            policy_number = "[Policy Number]"
+            diagnosis = "Medical Condition"
+            proj = {}
+            if stored_analysis:
+                proj = stored_analysis.get("claim_summary", stored_analysis.get("project_summary", {}))
+                applicant_name = proj.get("applicant_name", "Customer")
+                policy_number = proj.get("policy_number", "[Policy Number]")
+                diagnosis = proj.get("diagnosis", "Medical Condition")
+
             # Update ResolvedClaims collection
             await ResolvedClaims.update_one(
                 {"claim_id": s_claim_id},
@@ -452,6 +484,7 @@ async def send_claim_message(body: ChatRequest):
                         "session_id": body.session_id,
                         "resolved_at": now,
                         "resolution_type": "approved",
+                        "policy_number": policy_number,
                         "bill_amount": b_amount,
                         "deduction_percentage": settlement_info.get("deduction_percentage"),
                         "settlement_amount": s_amount,
@@ -466,16 +499,6 @@ async def send_claim_message(body: ChatRequest):
             from app.database import Claims
             await Claims.delete_one({"claim_id": s_claim_id})
             logger.info("Deleted claim %s from Claims collection after approval.", s_claim_id)
-
-            # Send Emails
-            applicant_name = "Customer"
-            policy_number = "[Policy Number]"
-            diagnosis = "Medical Condition"
-            if stored_analysis:
-                proj = stored_analysis.get("claim_summary", stored_analysis.get("project_summary", {}))
-                applicant_name = proj.get("applicant_name", "Customer")
-                policy_number = proj.get("policy_number", "[Policy Number]")
-                diagnosis = proj.get("diagnosis", "Medical Condition")
 
             try:
                 from app.email import Email
@@ -566,6 +589,9 @@ async def send_claim_message(body: ChatRequest):
                         "session_id": body.session_id,
                         "resolved_at": now,
                         "resolution_type": "custom_amount",
+                        "policy_number": (stored_analysis or {}).get(
+                            "claim_summary", (stored_analysis or {}).get("project_summary", {})
+                        ).get("policy_number", ""),
                         "bill_amount": b_amount,
                         "original_settlement": original_amount,
                         "final_amount": custom_amount,
@@ -827,9 +853,39 @@ async def send_claim_message(body: ChatRequest):
         )
         has_data = True
 
-    # ── Branch C: Normal follow-up Q&A ──────────────────────────────────────
+    # ── Branch C: AI-powered Q&A with full policy context ───────────────────
     elif stored_analysis:
-        response_msg = await _get_ai_qa_response(body.message, messages_history, stored_analysis)
+        # Always fetch live policy balance and inject it — AI decides what to use
+        _proj = stored_analysis.get("claim_summary", stored_analysis.get("project_summary", {}))
+        _policy_number = _proj.get("policy_number", "")
+        _policy_context: dict = {}
+
+        if _policy_number and _policy_number not in ("", "N/A", "Pending Analysis"):
+            _history_cursor = ResolvedClaims.find({"policy_number": _policy_number})
+            _history = [doc async for doc in _history_cursor]
+            _sum_insured = POLICY_SUM_INSURED
+            _total_claimed = sum(doc.get("final_amount", 0) or 0 for doc in _history)
+            _remaining = max(_sum_insured - _total_claimed, 0)
+            _policy_context = {
+                "policy_number": _policy_number,
+                "sum_insured": _sum_insured,
+                "total_previously_settled": _total_claimed,
+                "remaining_balance": _remaining,
+                "prior_claims": [
+                    {
+                        "claim_id": doc.get("claim_id"),
+                        "final_amount": doc.get("final_amount", 0),
+                        "resolution_type": doc.get("resolution_type", "approved"),
+                        "resolved_at": doc.get("resolved_at", "N/A").strftime("%d-%b-%Y")
+                        if hasattr(doc.get("resolved_at"), "strftime")
+                        else str(doc.get("resolved_at", "N/A"))[:10],
+                    }
+                    for doc in _history
+                ],
+            }
+
+        enriched_analysis = {**stored_analysis, "policy_balance": _policy_context}
+        response_msg = await _get_ai_qa_response(body.message, messages_history, enriched_analysis, is_settlement_pending=settlement_pending)
         has_data = True
 
     # ── Branch D: First message (Claim ID or Claims Selection) ──────────────────────────────────
@@ -1130,11 +1186,34 @@ async def send_claim_message(body: ChatRequest):
 
 async def _get_ai_qa_response(message: str, history: list, analysis: dict, is_settlement_pending: bool = False) -> str:
     """Helper to get a strictly grounded Q&A response from OpenAI."""
-    context_json = json.dumps(analysis, indent=2, default=str)
-    system_content = CLAIM_GROUNDED_PROMPT + "\n\n"
+    # Pull policy_balance out first so it's always visible — never buried/truncated
+    policy_balance = analysis.get("policy_balance", {})
+    policy_balance_block = ""
+    if policy_balance:
+        pb = policy_balance
+        prior = pb.get("prior_claims", [])
+        prior_lines = "\n".join(
+            f"  - {c.get('claim_id')} | ₹{c.get('final_amount', 0):,.2f} | {c.get('resolution_type', '')} | {c.get('resolved_at', '')}"
+            for c in prior
+        ) or "  None"
+        policy_balance_block = (
+            "\n\n--- POLICY BALANCE (LIVE FROM DATABASE — USE THESE EXACT NUMBERS) ---\n"
+            f"Policy Number        : {pb.get('policy_number', 'N/A')}\n"
+            f"Total Sum Insured    : ₹{pb.get('sum_insured', 0):,.2f}\n"
+            f"Total Settled So Far : ₹{pb.get('total_previously_settled', 0):,.2f}\n"
+            f"Remaining Balance    : ₹{pb.get('remaining_balance', 0):,.2f}\n"
+            f"Prior Claims:\n{prior_lines}\n"
+            "--- END POLICY BALANCE ---"
+        )
+
+    # Strip policy_balance from main JSON to avoid duplication
+    analysis_without_balance = {k: v for k, v in analysis.items() if k != "policy_balance"}
+    context_json = json.dumps(analysis_without_balance, indent=2, default=str)
+
+    system_content = CLAIM_GROUNDED_PROMPT + policy_balance_block + "\n\n"
     if is_settlement_pending:
         system_content += "A settlement offer is pending. Remind the user they can reply 'proceed' or suggest a different amount.\n\n"
-    
+
     system_content += f"CLAIM ANALYSIS DATA:\n{context_json[:8000]}"
 
     openai_msgs = [{"role": "system", "content": system_content}]
